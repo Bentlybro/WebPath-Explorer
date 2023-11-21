@@ -105,6 +105,10 @@
     <div id="graph-tooltip" class="tooltip"></div>
     <svg></svg>
     
+    <div id="slider-container" style="text-align: center; position: absolute; top: 25px; left: 10px;">
+        <button id="stopButton">Stop Simulation</button>
+    </div>
+
     <div id="slider-container" style="text-align: center; position: absolute; top: 50px; left: 10px;">
         <label for="distance-slider">Node Distance:</label>
         <input type="range" id="distance-slider" min="100" max="1000" value="500">
@@ -133,6 +137,19 @@
     <script>
         var simulation;
     
+        var simulationRunning = true;
+
+        document.getElementById('stopButton').addEventListener('click', function() {
+            if (simulationRunning) {
+                simulation.stop();
+                this.innerText = 'Resume Simulation';
+            } else {
+                simulation.restart();
+                this.innerText = 'Stop Simulation';
+            }
+            simulationRunning = !simulationRunning;
+        });
+
         document.getElementById('distance-slider').addEventListener('input', function(event) {
             var newDistance = +event.target.value;
             simulation.force("link").distance(newDistance);
