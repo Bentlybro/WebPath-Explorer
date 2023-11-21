@@ -99,6 +99,7 @@
     <div id="search-container" style="text-align: center; position: absolute; top: 10px; left: 50%; transform: translateX(-50%);">
         <form id="search-form">
             <input type="text" id="url-input" placeholder="Enter starting URL" required />
+            <input type="number" id="depth-input" placeholder="Max Depth" min="1" max="10" required />
             <button type="submit">Search</button>
         </form>
     </div>
@@ -111,7 +112,7 @@
 
     <div id="slider-container" style="text-align: center; position: absolute; top: 50px; left: 10px;">
         <label for="distance-slider">Node Distance:</label>
-        <input type="range" id="distance-slider" min="100" max="1000" value="500">
+        <input type="range" id="distance-slider" min="100" max="1000" value="200">
     </div>
     
     <div id="legend" style="position: absolute; top: 90px; left: 10px; background-color: black; color: white; padding: 10px; border: 1px solid #ccc; border-radius: 5px;">
@@ -210,25 +211,16 @@
     
             // Force simulation setup
             simulation = d3.forceSimulation(graph.nodes)
-                .force("link", d3.forceLink(graph.links).id(d => d.id).distance(500))
+                .force("link", d3.forceLink(graph.links).id(d => d.id).distance(200))
                 .force("charge", d3.forceManyBody().strength(-300))
                 .force("center", d3.forceCenter(width / 2, height / 2));
     
-            // Draw lines for links
-            var link = g.append("g")
-                .attr("class", "links")
-                .selectAll("line")
-                .data(graph.links)
-                .enter().append("line")
-                .attr("class", "link");
-    
-            // Node group
-            var node = g.append("g")
-                .attr("class", "nodes")
-                .selectAll("g")
-                .data(graph.nodes)
-                .enter().append("g");
-    
+                setTimeout(() => {
+                    simulation.stop();
+                    console.log("Simulation stopped after 15 seconds");
+                }, 15000);
+                
+
             var colorMap = {
                 "twitter": "blue",
                 "facebook": "cyan",
@@ -239,7 +231,54 @@
                 "google": "pink",
                 "other": "gray" // default color
             };
+
+            function linkColor(link) {
+                var sourceCategory = getCategory(graph.nodes.find(node => node.id === link.source.id).url);
+                var targetCategory = getCategory(graph.nodes.find(node => node.id === link.target.id).url);
+            
+                // Use source node category color, or target node category if source is not defined in the map
+                return colorMap[sourceCategory] || colorMap[targetCategory] || colorMap['other'];
+            }
+                
+            // Draw lines for links
+            var link = g.append("g")
+            .attr("class", "links")
+            .selectAll("line")
+            .data(graph.links)
+            .enter().append("line")
+            .attr("class", "link")
+            .style("stroke", d => linkColor(d))
+            .style("stroke-opacity", 0.2);
     
+            // Node group
+            var node = g.append("g")
+                .attr("class", "nodes")
+                .selectAll("g")
+                .data(graph.nodes)
+                .enter().append("g");
+    
+
+    
+            function findLinkedNodesBothWays(nodeId, edgesData, nodesData) {
+                let linkedToNodeIds = edgesData
+                    .filter(edge => edge.source === nodeId)
+                    .map(edge => edge.target);
+            
+                let linkedFromNodeIds = edgesData
+                    .filter(edge => edge.target === nodeId)
+                    .map(edge => edge.source);
+            
+                let linkedToNodes = nodesData
+                    .filter(node => linkedToNodeIds.includes(node.id))
+                    .map(node => node.url);
+            
+                let linkedFromNodes = nodesData
+                    .filter(node => linkedFromNodeIds.includes(node.id))
+                    .map(node => node.url);
+            
+                return { linkedToNodes, linkedFromNodes };
+            }
+
             node.append("circle")
             .attr("r", 5)
             .attr("fill", d => originalSearchUrls.includes(d.url) ? "gold" : colorMap[d.category]) // Highlight "Original Search"
@@ -261,21 +300,49 @@
                     console.error("Error sending request:", error);
                 });
             })
-            .on("mouseover", function (d) {
-                    tooltip.transition()
-                        .duration(200)
-                        .style("opacity", .9);
-                    tooltip.html(d.url)
-                        .style("left", (d3.event.pageX) + "px")
-                        .style("top", (d3.event.pageY - 28) + "px");
-                })
+            node.on("mouseover", function (d) {
+                tooltip.transition()
+                    .duration(200)
+                    .style("opacity", .9);
                 
-            .on("mouseout", function (d) {
-                    tooltip.transition()
-                        .duration(500)
-                        .style("opacity", 0);
+                let { linkedToNodes, linkedFromNodes } = findLinkedNodesBothWays(d.id, edgesData, nodesData);
+                let maxLinksToShow = 5; // maximum number of links to display
+            
+                let tooltipHtml = `<strong>Node URL:</strong> ${d.url}<br/>`;
+                tooltipHtml += `<strong>Links to:</strong><br/>`;
+            
+                linkedToNodes.slice(0, maxLinksToShow).forEach(linkedUrl => {
+                    tooltipHtml += `${linkedUrl}<br/>`;
                 });
-    
+            
+                if (linkedToNodes.length > maxLinksToShow) {
+                    tooltipHtml += `...and ${linkedToNodes.length - maxLinksToShow} more<br/>`;
+                }
+            
+                tooltipHtml += `<strong>Linked from:</strong><br/>`;
+                linkedFromNodes.slice(0, maxLinksToShow).forEach(linkedUrl => {
+                    tooltipHtml += `${linkedUrl}<br/>`;
+                });
+            
+                if (linkedFromNodes.length > maxLinksToShow) {
+                    tooltipHtml += `...and ${linkedFromNodes.length - maxLinksToShow} more`;
+                }
+            
+                tooltip.html(tooltipHtml)
+                    .style("left", (d3.event.pageX) + "px")
+                    .style("top", (d3.event.pageY - 28) + "px");
+            })
+            .on("mouseout", function (d) {
+                tooltip.transition()
+                    .duration(500)
+                    .style("opacity", 0);
+            })
+            .on("contextmenu", function (d) {
+                // Prevent default context menu
+                d3.event.preventDefault();
+                // Open link in new tab
+                window.open(d.url, '_blank');
+            });
 
                 
             // Add drag capabilities
@@ -296,6 +363,8 @@
     
                 node
                     .attr("transform", d => `translate(${d.x},${d.y})`);
+                    
+
             }
     
             function dragstarted(d) {
@@ -318,30 +387,30 @@
         });
     </script>
 
-<script>
-    document.getElementById('search-form').addEventListener('submit', function(event) {
-        event.preventDefault();
-        var startingUrl = document.getElementById('url-input').value;
-        var maxDepth = document.getElementById('depth-input').value; // Get the value of the depth input
-    
-        if (startingUrl && maxDepth) {
-            fetch('/api/search', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ starting_url: startingUrl, max_depth: maxDepth }),
-            })
-            .then(response => response.json())
-            .then(data => {
-                console.log('Crawl started:', data.message);
-                // You might want to trigger an update of your visualization here
-            })
-            .catch((error) => {
-                console.error('Error:', error);
-            });
-        }
-    });
-</script>
+    <script>
+        document.getElementById('search-form').addEventListener('submit', function(event) {
+            event.preventDefault();
+            var startingUrl = document.getElementById('url-input').value;
+            var maxDepth = document.getElementById('depth-input').value; // Get the value of the depth input
+        
+            if (startingUrl && maxDepth) {
+                fetch('/api/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ starting_url: startingUrl, max_depth: maxDepth }),
+                })
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Crawl started:', data.message);
+                    // You might want to trigger an update of your visualization here
+                })
+                .catch((error) => {
+                    console.error('Error:', error);
+                });
+            }
+        });
+    </script>
 </body>
 </html>
