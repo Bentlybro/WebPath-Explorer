@@ -66,13 +66,13 @@ async def fetch_links_async(url, visited, depth=1, max_depth=4):
                 for link in soup.find_all('a', href=True):
                     href = link['href']
                     if href.startswith('http'):
-                        print(f"Planning to visit: {href}")  # Print each link that will be visited
+                        print(f"Planning to visit: {href}")
                         target_id = insert_node(href)
                         insert_edge(source_id, target_id)
                         task = fetch_links_async(href, visited, depth + 1, max_depth)
                         tasks.append(task)
 
-                await asyncio.gather(*tasks)  # Wait for all the tasks to complete
+                await asyncio.gather(*tasks)
 
         except (aiohttp.ClientError, aiohttp.ClientResponseError) as e:
             print(f"Request failed for {url}: {e}")
@@ -104,7 +104,6 @@ async def search():
     except ValueError:
         abort(400, description="Invalid max depth provided.")
 
-    # Insert the original search into the database
     original_search_id = insert_original_search(starting_url, max_depth)
 
     visited_urls = set()
