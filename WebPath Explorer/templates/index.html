@@ -301,30 +301,30 @@
         });
     </script>
 
-    <script>
-        document.getElementById('search-form').addEventListener('submit', function(event) {
-            event.preventDefault();
-            var startingUrl = document.getElementById('url-input').value;
-            var maxDepth = 2; // Set this to your desired default or create another input for it
-        
-            if (startingUrl) {
-                fetch('/api/search', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ starting_url: startingUrl, max_depth: maxDepth }),
-                })
-                .then(response => response.json())
-                .then(data => {
-                    console.log('Crawl started:', data.message);
-                    // You might want to trigger an update of your visualization here
-                })
-                .catch((error) => {
-                    console.error('Error:', error);
-                });
-            }
-        });
-    </script>
+<script>
+    document.getElementById('search-form').addEventListener('submit', function(event) {
+        event.preventDefault();
+        var startingUrl = document.getElementById('url-input').value;
+        var maxDepth = document.getElementById('depth-input').value; // Get the value of the depth input
+    
+        if (startingUrl && maxDepth) {
+            fetch('/api/search', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ starting_url: startingUrl, max_depth: maxDepth }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('Crawl started:', data.message);
+                // You might want to trigger an update of your visualization here
+            })
+            .catch((error) => {
+                console.error('Error:', error);
+            });
+        }
+    });
+</script>
 </body>
 </html>
