@@ -1,145 +1,401 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Network Visualization</title>
-<script src="https://d3js.org/d3.v6.min.js"></script>
-<style>
-    body, html {
-        margin: 0;
-        padding: 0;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-    }
-    canvas {
-        width: 100%;
-        height: 100%;
-        background: #000;
-    }
-</style>
+    <meta charset="UTF-8">
+    <title>Web Graph Visualization</title>
+    <script src="https://d3js.org/d3.v5.min.js"></script>
+    <style>
+        body, html {
+            margin: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: black;
+        }
+        
+        svg {
+            display: block;
+        }
+        
+        .node circle {
+            fill: white; /* Ensure the fill is white */
+            stroke: #fff;
+            stroke-width: 1.5px;
+        }
+        
+        .link {
+            stroke: white;
+            stroke-opacity: 0.6;
+        }
+        
+        .tooltip {
+            position: absolute;
+            text-align: center;
+            width: auto;
+            height: auto;
+            padding: 6px;
+            font-size: 24px;
+            background: lightsteelblue;
+            border: 0px;
+            border-radius: 8px;
+            pointer-events: none;
+            opacity: 0;
+        }
+
+        .highlighted {
+            stroke: red; /* or any color you prefer */
+            stroke-width: 3px; /* Make the line thicker */
+        }
+        
+        .node-highlighted circle {
+            fill: red; /* Change color of the node */
+            stroke-width: 2px; /* Optional: Increase the stroke width */
+        }
+
+        #slider-container {
+            color: white; /* This will apply white color to the text inside slider-container */
+        }
+    
+        #slider-container label, 
+        #slider-container input {
+            color: white; /* White color for label and input (slider) text */
+        }
+    
+        /* Style for the slider thumb and track (optional) */
+        #distance-slider {
+            -webkit-appearance: none; /* Override default appearance */
+            width: 100%; /* Full-width */
+            height: 15px; /* Specified height */
+            background: #ddd; /* Grey background */
+            outline: none; /* Remove outline */
+            opacity: 0.7; /* Set transparency (optional) */
+            -webkit-transition: .2s; /* 0.2 seconds transition on hover */
+            transition: opacity .2s;
+        }
+    
+        #distance-slider:hover {
+            opacity: 1; /* Fully opaque on hover */
+        }
+    
+        /* Style for the slider thumb */
+        #distance-slider::-webkit-slider-thumb {
+            -webkit-appearance: none; /* Override default appearance */
+            appearance: none;
+            width: 25px; /* Width of the thumb */
+            height: 25px; /* Height of the thumb */
+            background: #fff; /* White background for the thumb */
+            cursor: pointer; /* Cursor on hover */
+        }
+    
+        #distance-slider::-moz-range-thumb {
+            width: 25px; /* Width of the thumb */
+            height: 25px; /* Height of the thumb */
+            background: #fff; /* White background for the thumb */
+            cursor: pointer; /* Cursor on hover */
+        }
+    </style>
 </head>
 <body>
-<canvas id="networkCanvas"></canvas>
-<script>
-    const canvas = document.getElementById('networkCanvas');
-    const ctx = canvas.getContext('2d');
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+    <div id="search-container" style="text-align: center; position: absolute; top: 10px; left: 50%; transform: translateX(-50%);">
+        <form id="search-form">
+            <input type="text" id="url-input" placeholder="Enter starting URL" required />
+            <input type="number" id="depth-input" placeholder="Max Depth" min="1" max="10" required />
+            <button type="submit">Search</button>
+        </form>
+    </div>
+    <div id="graph-tooltip" class="tooltip"></div>
+    <svg></svg>
     
-    let transform = d3.zoomIdentity;
-    let nodes = [];
-    let edges = [];
+    <div id="slider-container" style="text-align: center; position: absolute; top: 25px; left: 10px;">
+        <button id="stopButton">Stop Simulation</button>
+    </div>
+
+    <div id="slider-container" style="text-align: center; position: absolute; top: 50px; left: 10px;">
+        <label for="distance-slider">Node Distance:</label>
+        <input type="range" id="distance-slider" min="100" max="1000" value="200">
+    </div>
     
-    canvas.addEventListener('mousemove', function(event) {
-        const rect = canvas.getBoundingClientRect();
-        const scaleX = canvas.width / rect.width;    // Adjust these scales if your canvas is scaled differently
-        const scaleY = canvas.height / rect.height;
+    <div id="legend" style="position: absolute; top: 90px; left: 10px; background-color: black; color: white; padding: 10px; border: 1px solid #ccc; border-radius: 5px;">
+        <div style="display: flex; align-items: center; margin-bottom: 5px;">
+            <div style="width: 10px; height: 10px; background-color: blue; margin-right: 5px; border-radius: 50%;"></div>
+            <div>Twitter/X</div>
+        </div>
+        <div style="display: flex; align-items: center; margin-bottom: 5px;">
+            <div style="width: 10px; height: 10px; background-color: cyan; margin-right: 5px; border-radius: 50%;"></div>
+            <div>Facebook</div>
+        </div>
+        <div style="display: flex; align-items: center;">
+            <div style="width: 10px; height: 10px; background-color: green; margin-right: 5px; border-radius: 50%;"></div>
+            <div>Github</div>
+        </div>
+        <div style="display: flex; align-items: center;">
+            <div style="width: 10px; height: 10px; background-color: red; margin-right: 5px; border-radius: 50%;"></div>
+            <div>Youtube</div>
+        </div>
+        <div style="display: flex; align-items: center;">
+            <div style="width: 10px; height: 10px; background-color: pink; margin-right: 5px; border-radius: 50%;"></div>
+            <div>Google</div>
+        </div>
+    </div>
+
+    <script>
+        var simulation;
     
-        const mouseX = (event.clientX - rect.left) * scaleX;
-        const mouseY = (event.clientY - rect.top) * scaleY;
+        var simulationRunning = true;
+
+        document.getElementById('stopButton').addEventListener('click', function() {
+            if (simulationRunning) {
+                simulation.stop();
+                this.innerText = 'Resume Simulation';
+            } else {
+                simulation.restart();
+                this.innerText = 'Stop Simulation';
+            }
+            simulationRunning = !simulationRunning;
+        });
+
+        document.getElementById('distance-slider').addEventListener('input', function(event) {
+            var newDistance = +event.target.value;
+            simulation.force("link").distance(newDistance);
+            simulation.alpha(1).restart();
+        });
     
-        let hoverNode = null;
-        const hoverRadius = 20; // Increase this value to make it easier to hover over nodes
+        var svg = d3.select("svg"),
+            width = window.innerWidth,
+            height = window.innerHeight,
+            tooltip = d3.select(".tooltip");
     
-        nodes.forEach(node => {
-            const dx = mouseX - transform.applyX(node.x);
-            const dy = mouseY - transform.applyY(node.y);
-            if (dx * dx + dy * dy < hoverRadius * hoverRadius) {
-                hoverNode = node;
+        svg.attr("width", width).attr("height", height);
+    
+        var zoom = d3.zoom()
+            .scaleExtent([0.1, 30])
+            .on('zoom', zoomed);
+    
+        svg.call(zoom);
+    
+        function zoomed() {
+            g.attr('transform', d3.event.transform);
+        }
+    
+        var g = svg.append("g");
+    
+        window.addEventListener("resize", function() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            svg.attr("width", width).attr("height", height);
+        });
+    
+        function getCategory(url) {
+            if(url.includes("twitter.com")) return "twitter";
+            if(url.includes("github.com")) return "github";
+            if(url.includes("youtube.com")) return "youtube";
+            if(url.includes("facebook.com")) return "facebook";
+            if(url.includes("google.com")) return "google";
+            if(url.includes(".gov")) return "gov";
+            if(url.includes(".pdf")) return "pdf";
+            return "other";
+        }
+    
+        
+        Promise.all([
+        fetch('/api/nodes').then(response => response.json()),
+        fetch('/api/edges').then(response => response.json()),
+        fetch('/api/original_search_ids').then(response => response.json())
+        ]).then(([nodesData, edgesData, originalSearchIds]) => {
+            var originalSearchUrls = originalSearchIds.map(id => id.url);
+    
+            var graph = {
+                nodes: nodesData.map(node => ({ id: node.id, url: node.url, category: getCategory(node.url) })),
+                links: edgesData.map(edge => ({ source: edge.source, target: edge.target }))
+            };
+
+            simulation = d3.forceSimulation(graph.nodes)
+                .force("link", d3.forceLink(graph.links).id(d => d.id).distance(200))
+                .force("charge", d3.forceManyBody().strength(-300))
+                .force("center", d3.forceCenter(width / 2, height / 2));
+    
+                setTimeout(() => {
+                    simulation.stop();
+                    console.log("Simulation stopped after 15 seconds");
+                }, 15000);
+                
+
+            var colorMap = {
+                "twitter": "blue",
+                "facebook": "cyan",
+                "github": "green",
+                "gov": "orange",
+                "pdf": "purple",
+                "youtube": "red",
+                "google": "pink",
+                "other": "gray"
+            };
+
+            function linkColor(link) {
+                var sourceCategory = getCategory(graph.nodes.find(node => node.id === link.source.id).url);
+                var targetCategory = getCategory(graph.nodes.find(node => node.id === link.target.id).url);
+
+                return colorMap[sourceCategory] || colorMap[targetCategory] || colorMap['other'];
+            }
+            
+            var link = g.append("g")
+            .attr("class", "links")
+            .selectAll("line")
+            .data(graph.links)
+            .enter().append("line")
+            .attr("class", "link")
+            .style("stroke", d => linkColor(d))
+            .style("stroke-opacity", 0.2);
+    
+            var node = g.append("g")
+                .attr("class", "nodes")
+                .selectAll("g")
+                .data(graph.nodes)
+                .enter().append("g");
+
+            function findLinkedNodesBothWays(nodeId, edgesData, nodesData) {
+                let linkedToNodeIds = edgesData
+                    .filter(edge => edge.source === nodeId)
+                    .map(edge => edge.target);
+            
+                let linkedFromNodeIds = edgesData
+                    .filter(edge => edge.target === nodeId)
+                    .map(edge => edge.source);
+            
+                let linkedToNodes = nodesData
+                    .filter(node => linkedToNodeIds.includes(node.id))
+                    .map(node => node.url);
+            
+                let linkedFromNodes = nodesData
+                    .filter(node => linkedFromNodeIds.includes(node.id))
+                    .map(node => node.url);
+            
+                return { linkedToNodes, linkedFromNodes };
+            }
+
+            node.append("circle")
+            .attr("r", 5)
+            .attr("fill", d => originalSearchUrls.includes(d.url) ? "gold" : colorMap[d.category])
+            .on("click", function (d) { 
+                fetch('/api/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ starting_url: d.url })
+                }).then(response => {
+                    if (response.ok) {
+                        console.log("Search initiated for URL:", d.url);
+                    } else {
+                        console.error("Failed to initiate search for URL:", d.url);
+                    }
+                }).catch(error => {
+                    console.error("Error sending request:", error);
+                });
+            })
+            node.on("mouseover", function (d) {
+                tooltip.transition()
+                    .duration(200)
+                    .style("opacity", .9);
+                
+                let { linkedToNodes, linkedFromNodes } = findLinkedNodesBothWays(d.id, edgesData, nodesData);
+                let maxLinksToShow = 5;
+            
+                let tooltipHtml = `<strong>Node URL:</strong> ${d.url}<br/>`;
+                tooltipHtml += `<strong>Links to:</strong><br/>`;
+            
+                linkedToNodes.slice(0, maxLinksToShow).forEach(linkedUrl => {
+                    tooltipHtml += `${linkedUrl}<br/>`;
+                });
+            
+                if (linkedToNodes.length > maxLinksToShow) {
+                    tooltipHtml += `...and ${linkedToNodes.length - maxLinksToShow} more<br/>`;
+                }
+            
+                tooltipHtml += `<strong>Linked from:</strong><br/>`;
+                linkedFromNodes.slice(0, maxLinksToShow).forEach(linkedUrl => {
+                    tooltipHtml += `${linkedUrl}<br/>`;
+                });
+            
+                if (linkedFromNodes.length > maxLinksToShow) {
+                    tooltipHtml += `...and ${linkedFromNodes.length - maxLinksToShow} more`;
+                }
+            
+                tooltip.html(tooltipHtml)
+                    .style("left", (d3.event.pageX) + "px")
+                    .style("top", (d3.event.pageY - 28) + "px");
+            })
+            .on("mouseout", function (d) {
+                tooltip.transition()
+                    .duration(500)
+                    .style("opacity", 0);
+            })
+            .on("contextmenu", function (d) {
+                d3.event.preventDefault();
+                window.open(d.url, '_blank');
+            });
+
+            node.call(d3.drag()
+                .on("start", dragstarted)
+                .on("drag", dragged)
+                .on("end", dragended));
+    
+            simulation.on("tick", ticked);
+    
+            function ticked() {
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+    
+                node
+                    .attr("transform", d => `translate(${d.x},${d.y})`);
+
+            }
+            function dragstarted(d) {
+                if (!d3.event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }
+    
+            function dragged(d) {
+                d.fx = d3.event.x;
+                d.fy = d3.event.y;
+            }
+    
+            function dragended(d) {
+                if (!d3.event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }
+
+        });
+    </script>
+
+    <script>
+        document.getElementById('search-form').addEventListener('submit', function(event) {
+            event.preventDefault();
+            var startingUrl = document.getElementById('url-input').value;
+            var maxDepth = document.getElementById('depth-input').value;
+        
+            if (startingUrl && maxDepth) {
+                fetch('/api/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ starting_url: startingUrl, max_depth: maxDepth }),
+                })
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Crawl started:', data.message);
+                })
+                .catch((error) => {
+                    console.error('Error:', error);
+                });
             }
         });
-    
-        if (hoverNode) {
-            showTooltip(hoverNode, event.clientX, event.clientY);
-        } else {
-            hideTooltip();
-        }
-    });
-
-    function showTooltip(node, x, y) {
-        let tooltip = document.getElementById('tooltip');
-        if (!tooltip) {
-            tooltip = document.createElement('div');
-            tooltip.id = 'tooltip';
-            document.body.appendChild(tooltip);
-        }
-        tooltip.style.display = 'block';
-        tooltip.style.position = 'absolute';
-        tooltip.style.left = `${x}px`;
-        tooltip.style.top = `${y}px`;
-        tooltip.textContent = node.url; // Assuming the node object has a url field
-        tooltip.style.pointerEvents = 'none'; // Make sure the tooltip doesn't interfere with mouse events
-        tooltip.style.padding = '8px';
-        tooltip.style.background = 'rgba(255, 255, 255, 0.75)';
-        tooltip.style.border = '1px solid #ddd';
-        tooltip.style.borderRadius = '4px';
-    }
-
-    function hideTooltip() {
-        const tooltip = document.getElementById('tooltip');
-        if (tooltip) {
-            tooltip.style.display = 'none';
-        }
-    }
-
-    const simulation = d3.forceSimulation()
-        .force("link", d3.forceLink().id(d => d.id))
-        .force("charge", d3.forceManyBody())
-        .force("center", d3.forceCenter(canvas.width / 2, canvas.height / 2))
-        .on("tick", draw); // Continue to draw on each tick
-    
-    // Set up zoom and pan behavior
-    const zoomHandler = d3.zoom()
-        .on("zoom", (event) => {
-            transform = event.transform;
-            draw();
-        });
-    
-    // Call zoom on the canvas
-    d3.select(canvas).call(zoomHandler);
-    
-    function draw() {
-        ctx.save();
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.translate(transform.x, transform.y);
-        ctx.scale(transform.k, transform.k);
-        edges.forEach(drawLink);
-        nodes.forEach(drawNode);
-        ctx.restore();
-    }
-    
-    function drawNode(d) {
-        ctx.beginPath();
-        ctx.arc(d.x, d.y, 5, 0, 2 * Math.PI);
-        ctx.fillStyle = "#fff";
-        ctx.fill();
-    }
-    
-    function drawLink(l) {
-        ctx.beginPath();
-        ctx.moveTo(l.source.x, l.source.y);
-        ctx.lineTo(l.target.x, l.target.y);
-        ctx.strokeStyle = "#aaa";
-        ctx.stroke();
-    }
-    
-    async function fetchData() {
-        const nodesResponse = await fetch('/api/nodes');
-        const edgesResponse = await fetch('/api/edges');
-        nodes = await nodesResponse.json();
-        edges = await edgesResponse.json();
-    
-        simulation
-            .nodes(nodes)
-            .force("link")
-            .links(edges);
-    
-        draw(); // Initial draw
-    }
-    
-    fetchData();
-</script>
+    </script>
 </body>
 </html>

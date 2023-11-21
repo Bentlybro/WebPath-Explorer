@@ -43,44 +43,50 @@ def insert_original_search(url, depth):
     return search_id
 
 async def fetch_links_async(url, visited, depth=1, max_depth=4):
-    if depth > max_depth or url in visited:
+    if depth > max_depth:
+        return
+
+    source_id = insert_node(url)
+
+    # Only proceed with crawling if the URL hasn't been visited yet
+    if url not in visited:
+        visited.add(url)
+        print(f"Currently fetching links from: {url}")
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+        }
+
+        async with aiohttp.ClientSession(headers=headers) as session:
+            try:
+                async with session.get(url) as response:
+                    response.raise_for_status()
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    tasks = []
+
+                    for link in soup.find_all('a', href=True):
+                        href = link['href']
+                        if href.startswith('http'):
+                            target_id = insert_node(href)
+                            insert_edge(source_id, target_id)
+                            # Avoid re-crawling if the URL is already visited
+                            if href not in visited:
+                                print(f"Planning to visit: {href}")
+                                task = fetch_links_async(href, visited, depth + 1, max_depth)
+                                tasks.append(task)
+
+                    await asyncio.gather(*tasks)
+
+            except (aiohttp.ClientError, aiohttp.ClientResponseError) as e:
+                print(f"Request failed for {url}: {e}")
+            except Exception as e:
+                print(f"Error processing link {url}: {e}")
+
         if depth == 1:
             print(f"Finished going over {url}.")
-        return
-    visited.add(url)
-    source_id = insert_node(url)
-    print(f"Currently fetching links from: {url}")
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
-    }
-
-    async with aiohttp.ClientSession(headers=headers) as session:
-        try:
-            async with session.get(url) as response:
-                response.raise_for_status()
-                html_content = await response.text()
-                soup = BeautifulSoup(html_content, 'html.parser')
-                tasks = []
-
-                for link in soup.find_all('a', href=True):
-                    href = link['href']
-                    if href.startswith('http'):
-                        print(f"Planning to visit: {href}")
-                        target_id = insert_node(href)
-                        insert_edge(source_id, target_id)
-                        task = fetch_links_async(href, visited, depth + 1, max_depth)
-                        tasks.append(task)
-
-                await asyncio.gather(*tasks)
-
-        except (aiohttp.ClientError, aiohttp.ClientResponseError) as e:
-            print(f"Request failed for {url}: {e}")
-        except Exception as e:
-            print(f"Error processing link {url}: {e}")
-
-    if depth == 1:
-        print(f"Finished going over {url}.")
+    else:
+        print(f"Skipping already visited {url}.")
 
 @app.route('/')
 def index():
