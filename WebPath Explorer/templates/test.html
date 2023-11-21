@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Network Visualization</title>
+<script src="https://d3js.org/d3.v6.min.js"></script>
+<style>
+    body, html {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+    }
+    canvas {
+        width: 100%;
+        height: 100%;
+        background: #000;
+    }
+</style>
+</head>
+<body>
+<canvas id="networkCanvas"></canvas>
+<script>
+    const canvas = document.getElementById('networkCanvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    
+    let transform = d3.zoomIdentity;
+    let nodes = [];
+    let edges = [];
+    
+    canvas.addEventListener('mousemove', function(event) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;    // Adjust these scales if your canvas is scaled differently
+        const scaleY = canvas.height / rect.height;
+    
+        const mouseX = (event.clientX - rect.left) * scaleX;
+        const mouseY = (event.clientY - rect.top) * scaleY;
+    
+        let hoverNode = null;
+        const hoverRadius = 20; // Increase this value to make it easier to hover over nodes
+    
+        nodes.forEach(node => {
+            const dx = mouseX - transform.applyX(node.x);
+            const dy = mouseY - transform.applyY(node.y);
+            if (dx * dx + dy * dy < hoverRadius * hoverRadius) {
+                hoverNode = node;
+            }
+        });
+    
+        if (hoverNode) {
+            showTooltip(hoverNode, event.clientX, event.clientY);
+        } else {
+            hideTooltip();
+        }
+    });
+
+    function showTooltip(node, x, y) {
+        let tooltip = document.getElementById('tooltip');
+        if (!tooltip) {
+            tooltip = document.createElement('div');
+            tooltip.id = 'tooltip';
+            document.body.appendChild(tooltip);
+        }
+        tooltip.style.display = 'block';
+        tooltip.style.position = 'absolute';
+        tooltip.style.left = `${x}px`;
+        tooltip.style.top = `${y}px`;
+        tooltip.textContent = node.url; // Assuming the node object has a url field
+        tooltip.style.pointerEvents = 'none'; // Make sure the tooltip doesn't interfere with mouse events
+        tooltip.style.padding = '8px';
+        tooltip.style.background = 'rgba(255, 255, 255, 0.75)';
+        tooltip.style.border = '1px solid #ddd';
+        tooltip.style.borderRadius = '4px';
+    }
+
+    function hideTooltip() {
+        const tooltip = document.getElementById('tooltip');
+        if (tooltip) {
+            tooltip.style.display = 'none';
+        }
+    }
+
+    const simulation = d3.forceSimulation()
+        .force("link", d3.forceLink().id(d => d.id))
+        .force("charge", d3.forceManyBody())
+        .force("center", d3.forceCenter(canvas.width / 2, canvas.height / 2))
+        .on("tick", draw); // Continue to draw on each tick
+    
+    // Set up zoom and pan behavior
+    const zoomHandler = d3.zoom()
+        .on("zoom", (event) => {
+            transform = event.transform;
+            draw();
+        });
+    
+    // Call zoom on the canvas
+    d3.select(canvas).call(zoomHandler);
+    
+    function draw() {
+        ctx.save();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.translate(transform.x, transform.y);
+        ctx.scale(transform.k, transform.k);
+        edges.forEach(drawLink);
+        nodes.forEach(drawNode);
+        ctx.restore();
+    }
+    
+    function drawNode(d) {
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = "#fff";
+        ctx.fill();
+    }
+    
+    function drawLink(l) {
+        ctx.beginPath();
+        ctx.moveTo(l.source.x, l.source.y);
+        ctx.lineTo(l.target.x, l.target.y);
+        ctx.strokeStyle = "#aaa";
+        ctx.stroke();
+    }
+    
+    async function fetchData() {
+        const nodesResponse = await fetch('/api/nodes');
+        const edgesResponse = await fetch('/api/edges');
+        nodes = await nodesResponse.json();
+        edges = await edgesResponse.json();
+    
+        simulation
+            .nodes(nodes)
+            .force("link")
+            .links(edges);
+    
+        draw(); // Initial draw
+    }
+    
+    fetchData();
+</script>
+</body>
+</html>

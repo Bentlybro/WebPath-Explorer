@@ -86,6 +86,10 @@ async def fetch_links_async(url, visited, depth=1, max_depth=4):
 def index():
     return render_template('index.html')
 
+@app.route('/test')
+def test():
+    return render_template('test.html')
+
 @app.route('/api/search', methods=['GET', 'POST'])
 async def search():
     if request.method == 'POST':
