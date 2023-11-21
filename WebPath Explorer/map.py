@@ -37,7 +37,7 @@ def insert_edge(source_id, target_id):
 def insert_original_search(url, depth):
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('INSERT INTO original_searches (url, max_depth, search_date, is_original) VALUES (?, ?, CURRENT_TIMESTAMP, ?)', (url, depth, True))
+    c.execute('INSERT INTO original_searches (url, max_depth, is_original) VALUES (?, ?, ?)', (url, depth, True))
     conn.commit()
     search_id = c.lastrowid
     return search_id
