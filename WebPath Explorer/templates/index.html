@@ -201,15 +201,22 @@
             .filter(edge => edge.source === node)
             .map(edge => edge.target.url);
     
+        // Truncate the lists if they are longer than 8
+        const maxLinksToShow = 8;
+        const additionalFrom = connectionsFrom.length > maxLinksToShow ? `...and ${connectionsFrom.length - maxLinksToShow} more` : '';
+        const additionalTo = connectionsTo.length > maxLinksToShow ? `...and ${connectionsTo.length - maxLinksToShow} more` : '';
+        connectionsFrom.length = Math.min(connectionsFrom.length, maxLinksToShow);
+        connectionsTo.length = Math.min(connectionsTo.length, maxLinksToShow);
+    
         // Create HTML content for the tooltip
         let tooltipContent = `<strong>Node URL:</strong> ${node.url}<br>`;
         
         if (connectionsFrom.length > 0) {
-            tooltipContent += `<strong>Connections from:</strong> ${connectionsFrom.join(', ')}<br>`;
+            tooltipContent += `<strong>Connections from:</strong> ${connectionsFrom.join(', ')}${additionalFrom}<br>`;
         }
         
         if (connectionsTo.length > 0) {
-            tooltipContent += `<strong>Connections To:</strong> ${connectionsTo.join(', ')}<br>`;
+            tooltipContent += `<strong>Connections To:</strong> ${connectionsTo.join(', ')}${additionalTo}<br>`;
         }
     
         tooltip.style.display = 'block';
@@ -293,24 +300,33 @@
     
     function domainToColor(url) {
         const domainColors = {
-            'twitter.com': '#1DA1F2',
-            'facebook.com': '#3b5998', 
-            'youtube.com': '#DB4437',
-            'github.com': '#013220',
-            'google.com': '#f0f0f0',
-            'instagram.com': '#E1306C',
-            'linkedin.com': '#0077B5',
-
-            '.txt': '#a9a9a9',
-            'Image Files': '#FFA500',
-            'Audio Files': '#1DB954',
-            'Video Files': '#FF3333',
+            'twitter': '#1DA1F2',
+            'facebook': '#3b5998',
+            'youtube': '#DB4437',
+            'github': '#013220',
+            'google': '#f0f0f0',
+            'instagram': '#E1306C',
+            'linkedin': '#0077B5',
+            'whatsapp': '#25D366',
+            'spotify': '#1DB954',
+            'medium': '#12100E',
+            'pinterest': '#BD081C',
+            'reddit': '#FF4500',
+            'twitch': '#6441A4',
+            'steam': ' #66c0f4',
+    
+            // File Types
+            '.txt': '#a9a9a9', // Gray for Text files
+            'Image Files': '#FFA500', // Orange for Image files
+            'Audio Files': '#1DB954', // Green for Audio files
+            'Video Files': '#FF3333', // Red for Video files
+            'Compressed/Executable Files': '#FF0000' // Bright red for certain file types
         };
     
         const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.svg'];
-    
         const audioExtensions = ['.mp3', '.wav', '.aac'];
         const videoExtensions = ['.mp4', '.avi', '.mov'];
+        const compressedExecutableExtensions = ['.rar', '.zip', '.7z', '.exe'];
     
         for (const extension of imageExtensions) {
             if (url.endsWith(extension)) {
@@ -330,13 +346,19 @@
             }
         }
     
+        for (const extension of compressedExecutableExtensions) {
+            if (url.endsWith(extension)) {
+                return domainColors['Compressed/Executable Files'];
+            }
+        }
+    
         for (const domain in domainColors) {
             if (url.includes(domain)) {
                 return domainColors[domain];
             }
         }
     
-        return '#aaa';
+        return '#aaa'; // Default color if no match is found
     }
     
     function updateLegend() {
@@ -354,12 +376,16 @@
             'pinterest': '#BD081C',
             'reddit': '#FF4500',
             'twitch': '#6441A4',
+            'steam': ' #66c0f4',
+
     
-            '.txt Files': '#a9a9a9',
-            'All Audio Files': '#1DB954',
-            'All Video Files': '#FF3333',
-            'All Image Files': '#FFA500',
+            '.txt Files': '#a9a9a9', // Gray for Text files
+            'All Audio Files': '#1DB954', // Green for Audio files
+            'All Video Files': '#FF3333', // Red for Video files
+            'All Image Files': '#FFA500', // Orange for Image files
+            'Compressed/Executable Files': '#FF0000' // Bright red for certain file types
         };
+    
     
         const legend = document.getElementById('legend');
         legend.innerHTML = ''; // Clear existing legend items
