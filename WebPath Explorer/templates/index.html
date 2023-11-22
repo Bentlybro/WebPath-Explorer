@@ -18,6 +18,19 @@
         height: 100%;
         background: #000;
     }
+
+    #legend li {
+        margin: 5px 0;
+        display: flex;
+        align-items: center;
+    }
+    
+    .legend-color-box {
+        width: 20px;
+        height: 20px;
+        margin-right: 5px;
+        border: 1px solid #ddd;
+    }
 </style>
 </head>
 <body>
@@ -35,17 +48,23 @@
 <div id="search-container" style="position: absolute; top: 10px; left: 50%; transform: translateX(-50%); text-align: center;">
     <div style="display: inline-block; text-align: left;">
         <label for="url-input" style="color: white; display: block; margin-bottom: 5px;">Enter URL Here:</label>
-        <input type="text" id="url-input" style="color: white; padding: 5px; display: block;">
+        <input type="text" id="url-input" style="color: black; padding: 5px; display: block;">
     </div>
 
     <div style="display: inline-block; text-align: left; margin-left: 10px;">
         <label for="depth-input" style="color: white; display: block; margin-bottom: 5px;">Max Depth:</label>
-        <input type="number" id="depth-input" min="1" max="10" step="1" value="4" style="color: white; padding: 5px; display: block;">
+        <input type="number" id="depth-input" min="1" max="10" step="1" value="4" style="color: black; padding: 5px; display: block;">
     </div>
 
     <button id="search-button" style="color: white; background-color: #333; border: none; padding: 5px 10px; cursor: pointer; margin-top: 10px;">Search</button>
 </div>
 
+<div id="legend-container" style="position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 5px; border: 1px solid #ddd; color: white;">
+    <h3 style="color: white; margin-top: 0;">Color Legend</h3>
+    <ul id="legend" style="list-style: none; padding: 0;">
+        <!-- Color tags will be added here dynamically -->
+    </ul>
+</div>
 
 <script>
     const canvas = document.getElementById('networkCanvas');
@@ -138,7 +157,7 @@
         const mouseY = (event.clientY - rect.top) * scaleY;
     
         let hoverNode = null;
-        const hoverRadius = 20;
+        const hoverRadius = 10;
     
         nodes.forEach(node => {
             const dx = mouseX - transform.applyX(node.x);
@@ -149,11 +168,20 @@
         });
     
         if (hoverNode) {
+            updateTooltipPosition(event.clientX, event.clientY);
             showTooltip(hoverNode, event.clientX, event.clientY);
         } else {
             hideTooltip();
         }
     });
+
+    function updateTooltipPosition(x, y) {
+        let tooltip = document.getElementById('tooltip');
+        if (tooltip) {
+            tooltip.style.left = `${x}px`;
+            tooltip.style.top = `${y}px`;
+        }
+    }
 
     function showTooltip(node, x, y) {
         let tooltip = document.getElementById('tooltip');
@@ -266,11 +294,41 @@
     function domainToColor(url) {
         const domainColors = {
             'twitter.com': '#1DA1F2',
-            'facebook.com': '#3b5998',
+            'facebook.com': '#3b5998', 
             'youtube.com': '#DB4437',
             'github.com': '#013220',
-            'google.com': '#7F00FF',
+            'google.com': '#f0f0f0',
+            'instagram.com': '#E1306C',
+            'linkedin.com': '#0077B5',
+
+            '.txt': '#a9a9a9',
+            'Image Files': '#FFA500',
+            'Audio Files': '#1DB954',
+            'Video Files': '#FF3333',
         };
+    
+        const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.svg'];
+    
+        const audioExtensions = ['.mp3', '.wav', '.aac'];
+        const videoExtensions = ['.mp4', '.avi', '.mov'];
+    
+        for (const extension of imageExtensions) {
+            if (url.endsWith(extension)) {
+                return domainColors['Image Files'];
+            }
+        }
+    
+        for (const extension of audioExtensions) {
+            if (url.endsWith(extension)) {
+                return domainColors['Audio Files'];
+            }
+        }
+    
+        for (const extension of videoExtensions) {
+            if (url.endsWith(extension)) {
+                return domainColors['Video Files'];
+            }
+        }
     
         for (const domain in domainColors) {
             if (url.includes(domain)) {
@@ -281,6 +339,44 @@
         return '#aaa';
     }
     
+    function updateLegend() {
+        const domainColors = {
+            'twitter': '#1DA1F2',
+            'facebook': '#3b5998',
+            'youtube': '#DB4437',
+            'github': '#013220',
+            'google': '#f0f0f0',
+            'instagram': '#E1306C',
+            'linkedin': '#0077B5',
+            'whatsapp': '#25D366',
+            'spotify': '#1DB954',
+            'medium': '#12100E',
+            'pinterest': '#BD081C',
+            'reddit': '#FF4500',
+            'twitch': '#6441A4',
+    
+            '.txt Files': '#a9a9a9',
+            'All Audio Files': '#1DB954',
+            'All Video Files': '#FF3333',
+            'All Image Files': '#FFA500',
+        };
+    
+        const legend = document.getElementById('legend');
+        legend.innerHTML = ''; // Clear existing legend items
+    
+        Object.keys(domainColors).forEach(domain => {
+            const colorBox = document.createElement('div');
+            colorBox.className = 'legend-color-box';
+            colorBox.style.background = domainColors[domain];
+    
+            const listItem = document.createElement('li');
+            listItem.appendChild(colorBox);
+            listItem.appendChild(document.createTextNode(domain));
+    
+            legend.appendChild(listItem);
+        });
+    }
+    updateLegend();
     function drawNode(d) {
         let color = domainToColor(d.url);
         let radius = 5;
@@ -417,6 +513,20 @@
     }
 
     fetchData();
+
+    window.addEventListener('resize', resizeCanvas);
+
+    function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // Additional code to reposition or redraw elements if necessary
+        simulation.force("center", d3.forceCenter(canvas.width / 2, canvas.height / 2));
+        draw();
+    }
+
+    // Call resizeCanvas initially to set up canvas size
+    resizeCanvas();
 </script>
 </body>
 </html>
