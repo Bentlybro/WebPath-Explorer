@@ -37,6 +37,7 @@
 <canvas id="networkCanvas"></canvas>
 
 <div id="controls-container" style="position: absolute; bottom: 80px; left: 10px;">
+    <button id="clear-db-button" style="color: white; background-color: #333; border: none; padding: 5px 10px; cursor: pointer; margin-bottom: 10px;">Clear Database</button>
     <button id="toggle-simulation" style="color: white; background-color: #333; border: none; padding: 5px 10px; cursor: pointer;">Pause</button>
 </div>
 
@@ -79,6 +80,30 @@
     const depthInput = document.getElementById('depth-input');
     const searchButton = document.getElementById('search-button');
     
+    document.getElementById('clear-db-button').addEventListener('click', function() {
+        if (confirm('Are you sure you want to clear the database of all its nodes and links? This action cannot be undone.')) {
+            fetch('/api/cleardb', {
+                method: 'POST',
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.message) {
+                    alert(data.message);
+                } else {
+                    alert('Database cleared successfully.');
+                }
+                // Set a timeout to refresh the page after 2 seconds
+                setTimeout(function() {
+                    window.location.reload();
+                }, 2000);
+            })
+            .catch((error) => {
+                console.error('Error:', error);
+                alert('An error occurred while trying to clear the database.');
+            });
+        }
+    });
+
     // Add an event listener to the search button
     searchButton.addEventListener('click', function() {
         const url = urlInput.value.trim();

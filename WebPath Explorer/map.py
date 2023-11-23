@@ -143,5 +143,19 @@ def get_original_search_ids():
     conn.close()
     return jsonify([dict(search_id) for search_id in search_ids])
 
+@app.route('/api/cleardb', methods=['POST'])
+def clear_db():
+    conn = get_db_connection()
+    try:
+        conn.execute('DELETE FROM nodes')
+        conn.execute('DELETE FROM edges')
+        conn.commit()
+        return jsonify({'message': 'Database cleared successfully'}), 200
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port='5000', debug=True)
