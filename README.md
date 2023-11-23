@@ -6,13 +6,7 @@ Welcome to *WebPath Explorer*, your gateway to uncovering the hidden connections
 
 ⚙️ **Technology Stack**: The visual mapping is powered by D3.js, offering an interactive and dynamic graphical representation of web connections. The backend, built with Python Flask, handles the web exploration, mapping, and data retrieval, storing the results in a database for the frontend visualization.
 
-⚠️ **Performance Notice**: Currently, with over 20-30,000 nodes and 60,000 edges (links between websites), the tool may experience lag. We're working on optimizing this for smoother experiences in future updates.
-
-🔗 **Initiate the Journey**: Start by inputting a URL. Our tool springs into action, capturing every 'href' link on the page, weaving the first layer of this expansive web.
-
-🌀 **Dive Deeper**: The exploration deepens as WebPath Explorer follows each link, repeating the process. You control how many layers deep it goes, unraveling the web's complex structure.
-
-📊 **Visual Mapping**: The result is a dynamic visual graph, elegantly displaying the interconnectedness of websites. This bird's-eye view of web connections is perfect for those who want to understand the digital landscape.
+⚠️ **Performance Notice**: Currently, with over 20-30,000 nodes (websites) and 60,000 edges (links between websites), the tool may experience lag. We're working on optimizing this for smoother experiences in future updates.
 
 🖱️ **Interactive Exploration**: Left-click on a node to start a search from that point, or right-click on a node to visit its webpage. Discover and navigate the web in a more intuitive and engaging way!
 
