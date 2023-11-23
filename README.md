@@ -17,6 +17,8 @@ Welcome to *WebPath Explorer*, your gateway to uncovering the hidden connections
 🤝 **Join the Effort**: Contributions and pull requests are greatly appreciated! They play a crucial role in enhancing the capabilities of WebPath Explorer. Whether it's code optimization, new features, or bug fixes, your input helps us grow. Let's build a better tool together!
 
 
-![image](https://github.com/Bentlybro/WebPath-Explorer/assets/27962737/2c90d8cf-2e7b-487c-96fb-f6abbba8c1f3)
+![image](https://github.com/Bentlybro/WebPath-Explorer/assets/27962737/d9463746-70eb-4a8a-81df-6deffdf3c3fb)
 
-![image](https://github.com/Bentlybro/WebPath-Explorer/assets/27962737/94749bf5-e09b-4074-8343-46aa7bd25061)
+
+![image](https://github.com/Bentlybro/WebPath-Explorer/assets/27962737/c647ad83-b3d9-408d-918a-14c614997afb)
+
