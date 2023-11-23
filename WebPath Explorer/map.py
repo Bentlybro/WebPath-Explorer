@@ -3,8 +3,10 @@ import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify, request, abort, render_template, Response
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
 progress_stream = []
 
@@ -142,4 +144,4 @@ def get_original_search_ids():
     return jsonify([dict(search_id) for search_id in search_ids])
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port='25565', debug=True)
+    app.run(host='0.0.0.0', port='5000', debug=True)

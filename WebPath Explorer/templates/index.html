@@ -66,6 +66,9 @@
     </ul>
 </div>
 
+
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
     const canvas = document.getElementById('networkCanvas');
     const ctx = canvas.getContext('2d');
@@ -240,10 +243,12 @@
 
     const simulation = d3.forceSimulation()
         .force("link", d3.forceLink().id(d => d.id))
-        .force("charge", d3.forceManyBody())
+        .force('charge', d3.forceManyBody().strength(-20))
         .force("center", d3.forceCenter(canvas.width / 2, canvas.height / 2))
         .on("tick", draw);
     
+
+        
     const zoomHandler = d3.zoom()
         .on("zoom", (event) => {
             transform = event.transform;
@@ -363,7 +368,7 @@
     
     function updateLegend() {
         const domainColors = {
-            'twitter': '#1DA1F2',
+            'twitter/x': '#1DA1F2',
             'facebook': '#3b5998',
             'youtube': '#DB4437',
             'github': '#013220',
@@ -506,10 +511,17 @@
             const dx = mouseX - transform.applyX(node.x);
             const dy = mouseY - transform.applyY(node.y);
             if (dx * dx + dy * dy < (5 * transform.k) ** 2) {
-                sendNodeUrl(node.url);
+                confirmAndSendNodeUrl(node.url);
             }
         });
     });
+    
+    function confirmAndSendNodeUrl(url) {
+        const confirmation = confirm(`This will start a search from ${url}, are you sure?`);
+        if (confirmation) {
+            sendNodeUrl(url);
+        }
+    }
     
     function sendNodeUrl(url) {
         const maxDepth = 4;
