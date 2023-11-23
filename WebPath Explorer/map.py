@@ -149,6 +149,7 @@ def clear_db():
     try:
         conn.execute('DELETE FROM nodes')
         conn.execute('DELETE FROM edges')
+        conn.execute('DELETE FROM original_searches')
         conn.commit()
         return jsonify({'message': 'Database cleared successfully'}), 200
     except Exception as e:
