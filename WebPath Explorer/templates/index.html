@@ -267,13 +267,23 @@
     }
 
     const simulation = d3.forceSimulation()
-        .force("link", d3.forceLink().id(d => d.id))
-        .force('charge', d3.forceManyBody().strength(-20))
+        .force('charge', d3.forceManyBody().strength(-50)) // Increased repulsive force
+        .force("link", d3.forceLink().id(d => d.id).distance(50))
         .force("center", d3.forceCenter(canvas.width / 2, canvas.height / 2))
         .on("tick", draw);
-    
 
-        
+    
+    const defaultZoomScale = 0.1;
+
+    // Calculate the center position
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+    
+    // Calculate the translation needed to center the content
+    const translateX = centerX * (1 - defaultZoomScale);
+    const translateY = centerY * (1 - defaultZoomScale);
+    
+    // Modify the zoomHandler to start with the default scale and center the content
     const zoomHandler = d3.zoom()
         .on("zoom", (event) => {
             transform = event.transform;
@@ -281,6 +291,7 @@
         });
     
     d3.select(canvas).call(zoomHandler);
+    zoomHandler.transform(d3.select(canvas), d3.zoomIdentity.translate(translateX, translateY).scale(defaultZoomScale));
     
     function draw() {
         ctx.save();
