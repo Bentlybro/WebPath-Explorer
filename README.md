@@ -17,7 +17,7 @@ Welcome to *WebPath Explorer*, your gateway to uncovering the hidden connections
 🤝 **Join the Effort**: Contributions and pull requests are greatly appreciated! They play a crucial role in enhancing the capabilities of WebPath Explorer. Whether it's code optimization, new features, or bug fixes, your input helps us grow. Let's build a better tool together!
 
 ---
-[If You Like This Project Join My Discord Server](https://discord.gg/XbrtTTM2ZZ)
+[If You Like This Project Join My Discord Server](https://discord.gg/yjjC2J569K)
 
 https://github.com/Bentlybro/WebPath-Explorer/assets/27962737/269156c8-6adf-4a58-901d-2e0b1a97a5b9
 
