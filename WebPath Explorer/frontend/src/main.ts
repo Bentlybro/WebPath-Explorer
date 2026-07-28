@@ -1,10 +1,22 @@
 import "./styles.css";
 import type { State } from "@dylanebert/shallot";
-import { clearGraph, domainOf, fetchGraph, startCrawl } from "./api";
+import {
+  ApiError,
+  cancelCrawlJob,
+  clearGraph,
+  domainOf,
+  fetchBackendStats,
+  fetchCrawlJobs,
+  fetchGraph,
+  fetchGraphEdgePage,
+  fetchGraphManifest,
+  fetchGraphNodePage,
+  launchCrawl,
+} from "./api";
 import { GraphModel, type FilterState, type SelectionDetails } from "./graph/model";
 import { ShallotGraphRenderer, startShallotRenderer } from "./graph/renderer";
 import { LiveGraphSocket, type LiveConnectionState, type LiveGraphEvent } from "./live";
-import type { GraphEdge, GraphNode, GraphQuery, NodeId } from "./types";
+import type { CrawlJob, GraphDataset, GraphEdge, GraphNode, GraphQuery, NodeId } from "./types";
 import { shell } from "./ui/shell";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -98,7 +110,14 @@ let operationBusy = false;
 const activeCrawlIds = new Set<string>();
 const pendingCrawlUrls = new Map<string, number>();
 const recentCrawlCompletions = new Map<string, number>();
-type CrawlActivityState = "pending" | "running" | "completed" | "failed";
+type CrawlActivityState =
+  | "pending"
+  | "queued"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled";
 interface CrawlActivity {
   id: string;
   startUrl: string;
@@ -118,16 +137,16 @@ const pendingActivityIds = new Map<string, string[]>();
 let pendingActivitySerial = 0;
 let crawlActivityFrame = 0;
 let recentActivityTimer = 0;
-let liveNodes: GraphNode[] = [];
-let liveEdges: GraphEdge[] = [];
-let liveNodeIndex = new Map<string, number>();
-let liveEdgeKeys = new Set<string>();
+const stagedLiveNodes: GraphNode[] = [];
+const stagedLiveEdges: GraphEdge[] = [];
 let liveFlushTimer = 0;
 let liveDirtySince = 0;
 let externalResyncTimer = 0;
 let finalResyncRunning = false;
 let queuedResync: { message?: string } | null = null;
 let completionResyncNeeded = false;
+let loadBaselineSequence: number | null = null;
+const bufferedLoadEvents: LiveGraphEvent[] = [];
 
 function setBusy(busy: boolean, message?: string): void {
   operationBusy = busy;
@@ -148,8 +167,8 @@ function updateLiveIndicator(): void {
 }
 
 function crawlId(event: LiveGraphEvent): string | null {
-  if ("searchId" in event && event.searchId !== undefined) return `search:${String(event.searchId)}`;
   if ("jobId" in event && event.jobId !== undefined) return `job:${String(event.jobId)}`;
+  if ("searchId" in event && event.searchId !== undefined) return `search:${String(event.searchId)}`;
   if ("crawlId" in event && event.crawlId !== undefined) return `crawl:${String(event.crawlId)}`;
   return null;
 }
@@ -243,9 +262,11 @@ function ensureCrawlActivity(event: LiveGraphEvent): CrawlActivity | null {
 
 function updateCrawlActivity(event: LiveGraphEvent): void {
   const activity = ensureCrawlActivity(event);
-  if (!activity || activity.state === "completed" || activity.state === "failed") return;
+  if (!activity || isTerminalActivity(activity.state)) return;
   activity.state = event.type === "crawl-start" ? "running" : activity.state;
-  if (event.type !== "crawl-start" && activity.state === "pending") activity.state = "running";
+  if (event.type !== "crawl-start" && (activity.state === "pending" || activity.state === "queued")) {
+    activity.state = "running";
+  }
   if ("url" in event && event.url && activity.startUrl === "Unknown starting URL") {
     activity.startUrl = event.url;
   }
@@ -275,11 +296,15 @@ function updateCrawlActivity(event: LiveGraphEvent): void {
   scheduleCrawlActivityRender();
 }
 
+function isTerminalActivity(state: CrawlActivityState): boolean {
+  return state === "completed" || state === "failed" || state === "cancelled";
+}
+
 function completeCrawlActivity(
   key: string | null,
   url: string | undefined,
   message: string | undefined,
-  failed: boolean,
+  outcome: "completed" | "failed" | "cancelled",
 ): void {
   let activity = key ? crawlActivities.get(key) : undefined;
   if (!activity) activity = claimPendingActivity(url, key) ?? undefined;
@@ -292,18 +317,110 @@ function completeCrawlActivity(
       pagesVisited: 0,
       queuedPages: 0,
       edgeCount: 0,
-      state: failed ? "failed" : "completed",
+      state: outcome,
       startedAt: Date.now(),
     };
     crawlActivities.set(key, activity);
   }
   if (!activity) return;
   removePendingActivityReference(activity.id);
-  activity.state = failed ? "failed" : "completed";
+  activity.state = outcome;
   activity.queuedPages = 0;
   activity.message = message;
   activity.finishedAt = Date.now();
   scheduleCrawlActivityRender();
+}
+
+function jobStateToActivityState(status: CrawlJob["status"]): CrawlActivityState {
+  switch (status) {
+    case "queued":
+      return "queued";
+    case "running":
+      return "running";
+    case "cancel_requested":
+      return "cancelling";
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+  }
+}
+
+function jobTimestamp(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** Merge a durable crawl job into the activity feed, keyed as job:<uuid>. */
+function mergeJobActivity(job: CrawlJob): CrawlActivity {
+  const key = `job:${job.id}`;
+  let activity = crawlActivities.get(key);
+  if (!activity) {
+    const claimed = claimPendingActivity(job.starting_url, key);
+    activity = claimed ?? undefined;
+  }
+  const state = jobStateToActivityState(job.status);
+  if (!activity) {
+    activity = {
+      id: key,
+      startUrl: job.starting_url,
+      currentUrl: job.current_url ?? job.starting_url,
+      requestedDepth: job.max_depth,
+      depth: job.current_depth,
+      pagesVisited: job.pages_visited,
+      queuedPages: 0,
+      edgeCount: job.edges_observed,
+      state,
+      startedAt: jobTimestamp(job.started_at) ?? jobTimestamp(job.created_at) ?? Date.now(),
+    };
+    crawlActivities.set(key, activity);
+  }
+  activity.requestedDepth = job.max_depth;
+  activity.depth = Math.max(activity.depth, job.current_depth);
+  activity.pagesVisited = Math.max(activity.pagesVisited, job.pages_visited);
+  activity.edgeCount = Math.max(activity.edgeCount, job.edges_observed);
+  if (job.current_url) activity.currentUrl = job.current_url;
+  if (!isTerminalActivity(activity.state) || isTerminalActivity(state)) {
+    activity.state = state;
+  }
+  if (job.error) activity.message = job.error;
+  const finishedAt = jobTimestamp(job.finished_at);
+  if (isTerminalActivity(state) && finishedAt !== undefined) {
+    activity.finishedAt = finishedAt;
+  }
+  if (isTerminalActivity(activity.state)) activeCrawlIds.delete(key);
+  else activeCrawlIds.add(key);
+  return activity;
+}
+
+async function refreshCrawlJobs(): Promise<void> {
+  try {
+    const jobs = await fetchCrawlJobs({ limit: 50 });
+    for (const job of jobs) mergeJobActivity(job);
+    scheduleCrawlActivityRender();
+    updateLiveIndicator();
+  } catch {
+    // Servers without the durable job API simply skip the merge.
+  }
+}
+
+async function requestJobCancellation(activity: CrawlActivity): Promise<void> {
+  if (!activity.id.startsWith("job:")) return;
+  activity.state = "cancelling";
+  scheduleCrawlActivityRender();
+  try {
+    const job = await cancelCrawlJob(activity.id.slice(4));
+    if (job) mergeJobActivity(job);
+    else toast("That crawl job is no longer available.", true);
+  } catch (error) {
+    activity.state = "running";
+    toast(error instanceof Error ? error.message : String(error), true);
+  }
+  scheduleCrawlActivityRender();
+  updateLiveIndicator();
 }
 
 function activityHost(url: string): string {
@@ -315,12 +432,18 @@ function activityStatusLabel(state: CrawlActivityState): string {
   switch (state) {
     case "pending":
       return "Launching";
+    case "queued":
+      return "Queued";
     case "running":
       return "Running";
+    case "cancelling":
+      return "Cancelling";
     case "completed":
       return "Completed";
     case "failed":
       return "Failed";
+    case "cancelled":
+      return "Cancelled";
   }
 }
 
@@ -386,7 +509,18 @@ function crawlActivityCard(activity: CrawlActivity): HTMLElement {
     crawlMetric("Edges", exactFormatter.format(activity.edgeCount)),
   );
   card.append(head, route, metrics);
-  if (activity.message && (activity.state === "failed" || activity.state === "completed")) {
+  if (
+    activity.id.startsWith("job:") &&
+    (activity.state === "queued" || activity.state === "running")
+  ) {
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "crawl-cancel-button";
+    cancel.textContent = "Cancel crawl";
+    cancel.addEventListener("click", () => void requestJobCancellation(activity));
+    card.append(cancel);
+  }
+  if (activity.message && isTerminalActivity(activity.state)) {
     const message = document.createElement("p");
     message.className = "crawl-activity-message";
     message.textContent = activity.message;
@@ -406,10 +540,10 @@ function renderCrawlActivities(): void {
   }
 
   const active = [...crawlActivities.values()]
-    .filter((activity) => activity.state === "pending" || activity.state === "running")
+    .filter((activity) => !isTerminalActivity(activity.state))
     .sort((left, right) => right.startedAt - left.startedAt);
   const recent = [...crawlActivities.values()]
-    .filter((activity) => activity.state === "completed" || activity.state === "failed")
+    .filter((activity) => isTerminalActivity(activity.state))
     .sort((left, right) => (right.finishedAt ?? 0) - (left.finishedAt ?? 0))
     .slice(0, 8);
 
@@ -487,9 +621,9 @@ function responseCrawlId(result: {
   original_search_id?: NodeId;
   job_id?: NodeId;
 }): string | null {
+  if (result.job_id !== undefined) return `job:${String(result.job_id)}`;
   const searchId = result.search_id ?? result.original_search_id;
   if (searchId !== undefined) return `search:${String(searchId)}`;
-  if (result.job_id !== undefined) return `job:${String(result.job_id)}`;
   return null;
 }
 
@@ -503,12 +637,12 @@ function finishTrackedCrawl(
   key: string | null,
   url?: string,
   message?: string,
-  error = false,
+  outcome: "completed" | "failed" | "cancelled" = "completed",
 ): void {
   const now = performance.now();
   trimRecentCrawlCompletions(now);
   consumePendingCrawl(url);
-  completeCrawlActivity(key, url, message, error);
+  completeCrawlActivity(key, url, message, outcome);
 
   if (key && recentCrawlCompletions.has(key)) {
     activeCrawlIds.delete(key);
@@ -523,18 +657,18 @@ function finishTrackedCrawl(
   completionResyncNeeded = true;
   const remaining = currentCrawlCount();
   updateLiveIndicator();
-  if (error && message) toast(message, true);
+  if (outcome === "failed" && message) toast(message, true);
 
   if (remaining === 0) {
     completionResyncNeeded = false;
-    void finalGraphResync(error ? undefined : message);
+    void finalGraphResync(outcome === "failed" ? undefined : message);
     return;
   }
 
   statusMessage.textContent = `${exactFormatter.format(remaining)} crawl${
     remaining === 1 ? "" : "s"
   } still running · graph streaming live`;
-  if (!error && message) toast(message);
+  if (outcome === "completed" && message) toast(message);
 }
 
 function toast(message: string, error = false): void {
@@ -596,7 +730,7 @@ function updateStats(): void {
 
 function fitGraph(): void {
   if (!model) return;
-  renderer.fit(model.bounds, canvas.clientWidth, canvas.clientHeight);
+  renderer.fit(model.framingBounds(), canvas.clientWidth, canvas.clientHeight);
   updateCameraStatus();
 }
 
@@ -628,85 +762,163 @@ interface LoadGraphOptions {
   fit?: boolean;
 }
 
+function emptyDataset(eventSequence?: number): GraphDataset {
+  return {
+    nodes: [],
+    edges: [],
+    stats: { total_nodes: 0, total_edges: 0 },
+    truncated: false,
+    source: "graph-v2",
+    eventSequence,
+  };
+}
+
+/**
+ * Load the graph through the progressive v2 API: create a snapshot manifest,
+ * append node pages then edge pages into one incremental model, and buffer
+ * live events newer than the manifest's event sequence until the load ends.
+ * Older servers without the v2 routes fall back to the legacy graph API.
+ */
 async function loadGraph(
   query: GraphQuery = {},
   options: LoadGraphOptions = { fit: true },
+  retried = false,
 ): Promise<void> {
   loadController?.abort();
   const controller = new AbortController();
   loadController = controller;
   setBusy(true, "Loading the graph…");
   try {
-    const dataset = await fetchGraph(query, controller.signal);
+    const manifest = await fetchGraphManifest(query, controller.signal);
     if (controller.signal.aborted) return;
-    statusMessage.textContent = "Building typed graph buffers…";
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    const nextModel = new GraphModel(dataset);
-    if (controller.signal.aborted) return;
+    if (!manifest) {
+      await loadGraphLegacy(query, options, controller);
+      return;
+    }
+
+    const nextModel = new GraphModel(emptyDataset(manifest.event_sequence));
+    nextModel.dataset.stats.total_nodes = manifest.counts.nodes;
+    nextModel.dataset.stats.total_edges = manifest.counts.edges;
+    nextModel.updateFilter(filterState());
     model = nextModel;
     renderer.setModel(nextModel);
-    resetLiveBase(dataset.nodes, dataset.edges);
+    loadBaselineSequence = manifest.event_sequence;
+    const backendStats = await fetchBackendStats(controller.signal);
+    if (backendStats) {
+      nextModel.dataset.stats.total_nodes = backendStats.nodes ?? manifest.counts.nodes;
+      nextModel.dataset.stats.total_edges = backendStats.edges ?? manifest.counts.edges;
+      nextModel.dataset.stats.total_domains = backendStats.domains;
+      nextModel.dataset.stats.total_searches = backendStats.searches;
+      nextModel.dataset.stats.total_agents = backendStats.agents;
+    }
+    try {
+      let after = 0;
+      const nodeLimit = manifest.recommended_limits.nodes;
+      while (true) {
+        const page = await fetchGraphNodePage(
+          manifest.snapshot,
+          after,
+          nodeLimit,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        nextModel.appendNodes(page.items);
+        renderer.syncModel();
+        updateStats();
+        statusMessage.textContent = `Loading nodes · ${formatter.format(
+          nextModel.nodes.length,
+        )} of ${formatter.format(manifest.counts.nodes)}`;
+        if (page.page.done || page.page.next_after === null) break;
+        after = page.page.next_after;
+      }
+      after = 0;
+      const edgeLimit = manifest.recommended_limits.edges;
+      while (true) {
+        const page = await fetchGraphEdgePage(
+          manifest.snapshot,
+          after,
+          edgeLimit,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        nextModel.appendEdges(page.items);
+        renderer.syncModel();
+        updateStats();
+        statusMessage.textContent = `Loading links · ${formatter.format(
+          nextModel.edgeCount,
+        )} of ${formatter.format(manifest.counts.edges)}`;
+        if (page.page.done || page.page.next_after === null) break;
+        after = page.page.next_after;
+      }
+    } finally {
+      loadBaselineSequence = null;
+    }
+    const buffered = bufferedLoadEvents.splice(0);
+    for (const event of buffered) handleLiveEvent(event);
+    flushLiveGraph();
     addOptions(domainFilter, nextModel.uniqueDomains());
     addOptions(kindFilter, nextModel.uniqueKinds());
     if (options.fit !== false) fitGraph();
     updateStats();
-    const sourceLabel = dataset.source === "graph" ? "graph API" : "legacy API bridge";
-    statusMessage.textContent = `Loaded through ${sourceLabel}${dataset.truncated ? " · slice capped" : ""}`;
-    if (dataset.truncated) {
-      toast("This view is a bounded slice of the permanent graph. Refine search to explore more.");
-    }
+    updateVisibleStats();
+    statusMessage.textContent = `Loaded ${formatter.format(
+      nextModel.nodes.length,
+    )} nodes and ${formatter.format(nextModel.edgeCount)} links through the progressive graph API`;
   } catch (error) {
     if (controller.signal.aborted) return;
+    if (
+      !retried &&
+      error instanceof ApiError &&
+      error.status === 409
+    ) {
+      // The snapshot token expired mid-load; start over with a fresh one.
+      await loadGraph(query, options, true);
+      return;
+    }
     const message = error instanceof Error ? error.message : String(error);
     statusMessage.textContent = `Graph load failed · ${message}`;
     toast(message, true);
   } finally {
+    loadBaselineSequence = null;
     if (!controller.signal.aborted) setBusy(false);
   }
 }
 
-function idKey(value: NodeId | GraphNode): string {
-  return typeof value === "object" ? String(value.id) : String(value);
-}
-
-function edgeKey(edge: GraphEdge): string {
-  return `${idKey(edge.source)}\u0000${idKey(edge.target)}\u0000${edge.kind ?? "links_to"}`;
-}
-
-function resetLiveBase(nodes: GraphNode[], edges: GraphEdge[]): void {
-  liveNodes = nodes.slice();
-  liveEdges = edges.slice();
-  liveNodeIndex = new Map();
-  for (let index = 0; index < liveNodes.length; index++) {
-    const node = liveNodes[index];
-    if (!node) continue;
-    liveNodeIndex.set(String(node.id), index);
-    liveNodeIndex.set(`url:${node.url}`, index);
+async function loadGraphLegacy(
+  query: GraphQuery,
+  options: LoadGraphOptions,
+  controller: AbortController,
+): Promise<void> {
+  const dataset = await fetchGraph(query, controller.signal);
+  if (controller.signal.aborted) return;
+  statusMessage.textContent = "Building typed graph buffers…";
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  const nextModel = new GraphModel(dataset);
+  if (controller.signal.aborted) return;
+  nextModel.updateFilter(filterState());
+  model = nextModel;
+  renderer.setModel(nextModel);
+  flushLiveGraph();
+  addOptions(domainFilter, nextModel.uniqueDomains());
+  addOptions(kindFilter, nextModel.uniqueKinds());
+  if (options.fit !== false) fitGraph();
+  updateStats();
+  updateVisibleStats();
+  const sourceLabel = dataset.source === "graph" ? "graph API" : "legacy API bridge";
+  statusMessage.textContent = `Loaded through ${sourceLabel}${dataset.truncated ? " · slice capped" : ""}`;
+  if (dataset.truncated) {
+    toast("This view is a bounded slice of the permanent graph. Refine search to explore more.");
   }
-  liveEdgeKeys = new Set(liveEdges.map(edgeKey));
 }
 
-function upsertLiveNode(node: GraphNode, flush = true): void {
-  const existingIndex =
-    liveNodeIndex.get(String(node.id)) ?? liveNodeIndex.get(`url:${node.url}`);
-  if (existingIndex !== undefined) {
-    const existing = liveNodes[existingIndex];
-    if (existing) Object.assign(existing, node);
-  } else {
-    const index = liveNodes.length;
-    liveNodes.push(node);
-    liveNodeIndex.set(String(node.id), index);
-    liveNodeIndex.set(`url:${node.url}`, index);
-  }
-  if (flush) scheduleLiveFlush();
+function stageLiveNode(node: GraphNode): void {
+  stagedLiveNodes.push(node);
+  scheduleLiveFlush();
 }
 
-function appendLiveEdge(edge: GraphEdge, flush = true): void {
-  const key = edgeKey(edge);
-  if (liveEdgeKeys.has(key)) return;
-  liveEdgeKeys.add(key);
-  liveEdges.push(edge);
-  if (flush) scheduleLiveFlush();
+function stageLiveEdge(edge: GraphEdge): void {
+  stagedLiveEdges.push(edge);
+  scheduleLiveFlush();
 }
 
 function scheduleLiveFlush(): void {
@@ -717,38 +929,25 @@ function scheduleLiveFlush(): void {
   liveFlushTimer = window.setTimeout(flushLiveGraph, Math.min(100, maxWaitRemaining));
 }
 
+/**
+ * Append staged live nodes and edges to the incremental model and upload
+ * only the dirty ranges to the GPU. Staged data survives while no model is
+ * loaded so deltas that arrive before the first snapshot are not lost.
+ */
 function flushLiveGraph(): void {
   window.clearTimeout(liveFlushTimer);
   liveFlushTimer = 0;
   liveDirtySince = 0;
   if (!model) return;
-  const selectedId = currentDetails?.node.id;
-  const graphStats = model.dataset.stats;
-  const nextModel = new GraphModel({
-    nodes: liveNodes,
-    edges: liveEdges,
-    stats: {
-      ...graphStats,
-      total_nodes: Math.max(graphStats.total_nodes, liveNodes.length),
-      total_edges: Math.max(graphStats.total_edges, liveEdges.length),
-      visible_nodes: liveNodes.length,
-      visible_edges: liveEdges.length,
-    },
-    truncated: model.dataset.truncated,
-    source: model.dataset.source,
-  });
-  nextModel.updateFilter(filterState());
-  if (selectedId !== undefined) {
-    const selectedIndex = nextModel.nodeIndex.get(String(selectedId));
-    if (selectedIndex !== undefined) {
-      nextModel.setSelected(selectedIndex);
-      const details = nextModel.selectionDetails(selectedIndex);
-      if (details) showDetails(details);
-    }
-  }
-  model = nextModel;
-  renderer.setModel(nextModel);
+  if (stagedLiveNodes.length) model.appendNodes(stagedLiveNodes.splice(0));
+  if (stagedLiveEdges.length) model.appendEdges(stagedLiveEdges.splice(0));
+  renderer.syncModel();
   updateStats();
+  updateVisibleStats();
+  if (currentDetails) {
+    const details = model.selectionDetails(currentDetails.index);
+    if (details) showDetails(details);
+  }
 }
 
 async function finalGraphResync(message?: string): Promise<void> {
@@ -790,7 +989,26 @@ function progressLabel(event: Extract<LiveGraphEvent, { type: "crawl-progress" }
   return parts.length ? `Crawling · ${parts.join(" · ")}` : "Crawl in progress…";
 }
 
+function isGraphDataEvent(event: LiveGraphEvent): boolean {
+  return (
+    event.type === "node" ||
+    event.type === "edge" ||
+    event.type === "graph-delta" ||
+    event.type === "graph-changed"
+  );
+}
+
 function handleLiveEvent(event: LiveGraphEvent): void {
+  // While a snapshot loads, hold graph-carrying events that are newer than
+  // the manifest's high-water event sequence. They are replayed once the
+  // edge phase finishes so the model never applies a delta twice.
+  if (loadBaselineSequence !== null && isGraphDataEvent(event)) {
+    const sequence = "sequence" in event ? event.sequence : undefined;
+    if (sequence === undefined || sequence > loadBaselineSequence) {
+      bufferedLoadEvents.push(event);
+    }
+    return;
+  }
   switch (event.type) {
     case "crawl-start":
       trackLiveCrawl(event);
@@ -806,16 +1024,16 @@ function handleLiveEvent(event: LiveGraphEvent): void {
       break;
     case "node":
       trackLiveCrawl(event);
-      upsertLiveNode(event.node);
+      stageLiveNode(event.node);
       break;
     case "edge":
       trackLiveCrawl(event);
-      appendLiveEdge(event.edge);
+      stageLiveEdge(event.edge);
       break;
     case "graph-delta":
       trackLiveCrawl(event);
-      for (const node of event.nodes) upsertLiveNode(node, false);
-      for (const edge of event.edges) appendLiveEdge(edge, false);
+      for (const node of event.nodes) stagedLiveNodes.push(node);
+      for (const edge of event.edges) stagedLiveEdges.push(edge);
       if (event.nodes.length || event.edges.length) scheduleLiveFlush();
       statusMessage.textContent = event.currentUrl
         ? `${exactFormatter.format(currentCrawlCount())} active · ${domainOf(
@@ -835,8 +1053,16 @@ function handleLiveEvent(event: LiveGraphEvent): void {
         event.message ?? "Crawl complete · graph synchronized",
       );
       break;
+    case "crawl-cancelled":
+      finishTrackedCrawl(
+        crawlId(event),
+        event.url,
+        event.message ?? "Crawl cancelled",
+        "cancelled",
+      );
+      break;
     case "crawl-error":
-      finishTrackedCrawl(crawlId(event), event.url, event.message, true);
+      finishTrackedCrawl(crawlId(event), event.url, event.message, "failed");
       break;
     case "hello":
     case "unknown":
@@ -855,6 +1081,7 @@ const liveSocket = new LiveGraphSocket({
 
 livePill.addEventListener("click", () => {
   setCrawlDrawerOpen(crawlDrawer.hidden);
+  if (!crawlDrawer.hidden) void refreshCrawlJobs();
 });
 
 document.addEventListener("pointerdown", (event) => {
@@ -1201,28 +1428,35 @@ crawlForm.addEventListener("submit", async (event) => {
     currentCrawlCount(),
   )} crawl${currentCrawlCount() === 1 ? "" : "s"} active`;
   try {
-    const result = await startCrawl({ starting_url: url.href, max_depth: depth });
-    const completed =
-      result.status === "completed" ||
-      result.status === "complete" ||
-      /crawl completed/i.test(result.message);
-    if (completed) {
-      finishTrackedCrawl(
-        responseCrawlId(result),
-        url.href,
-        result.message || "Expedition added to the graph",
-      );
-    } else if (!completed) {
+    const result = await launchCrawl({ starting_url: url.href, max_depth: depth });
+    if (result.kind === "job" && result.job) {
+      const activity = mergeJobActivity(result.job);
+      activeCrawlIds.add(activity.id);
       consumePendingCrawl(url.href);
-      statusMessage.textContent = "Crawl accepted · waiting for live updates…";
-      updateLiveIndicator();
+      statusMessage.textContent = "Crawl queued · a worker will pick it up shortly…";
+    } else if (result.legacy) {
+      const legacy = result.legacy;
+      const completed =
+        legacy.status === "completed" ||
+        legacy.status === "complete" ||
+        /crawl completed/i.test(legacy.message);
+      if (completed) {
+        finishTrackedCrawl(
+          responseCrawlId(legacy),
+          url.href,
+          legacy.message || "Expedition added to the graph",
+        );
+      } else {
+        consumePendingCrawl(url.href);
+        statusMessage.textContent = "Crawl accepted · waiting for live updates…";
+      }
     }
   } catch (error) {
     finishTrackedCrawl(
       null,
       url.href,
       error instanceof Error ? error.message : String(error),
-      true,
+      "failed",
     );
   } finally {
     consumePendingCrawl(url.href);
@@ -1315,6 +1549,7 @@ document.addEventListener("keydown", (event) => {
 async function bootstrap(): Promise<void> {
   liveSocket.connect();
   updateLiveIndicator();
+  void refreshCrawlJobs();
   if (!navigator.gpu) {
     const message =
       "WebGPU is unavailable. Enable hardware acceleration or open this page in a current browser.";

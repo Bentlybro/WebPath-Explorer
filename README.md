@@ -6,8 +6,11 @@ The current system provides the following capabilities:
 
 - The Shallot/WebGPU viewer switches between a stable 2D overview and a genuinely volumetric 3D scene with independent XYZ positions, orbit controls, perspective projection, depth testing, filtering, neighborhood isolation, node details, and crawl actions.
 - A same-origin WebSocket stream pushes crawl lifecycle events and batched node and connection deltas into the open graph in real time.
-- The live status badge opens an accessible crawl monitor that shows every pending or running crawl, its starting URL, current URL, depth, visited pages, queued pages, observed edges, and recent completion or failure state.
-- The renderer-oriented graph API returns the complete graph by default while retaining optional limits, filters, neighborhoods, and keyset pagination for constrained clients.
+- Durable background crawl jobs accept submissions immediately, run on a bounded worker pool, survive process restarts, and support cooperative cancellation from the crawl monitor.
+- The live status badge opens an accessible crawl monitor that shows every pending or running crawl, its starting URL, current URL, depth, visited pages, queued pages, observed edges, cancellation controls, and recent completion, failure, or cancellation state.
+- A progressive graph API delivers snapshot-bounded node and edge pages with independent cursors, so a growing graph can be loaded incrementally without one enormous JSON response.
+- The renderer-oriented legacy graph API remains available and returns the complete graph by default while retaining optional limits, filters, neighborhoods, and keyset pagination for constrained clients.
+- Live deltas append into geometrically grown typed arrays and GPU buffers, so streaming growth uploads only changed ranges instead of rebuilding the CPU model and replacing every buffer.
 - Additive SQLite migrations preserve the original graph while adding durable agents, research sessions, searches, relationships, and idempotent observations.
 - AI agents can append searches and sources through a transactional ingestion API or the dependency-free Python bridge.
 - The crawler uses shared asynchronous HTTP sessions, bounded concurrency, timeouts, page and response limits, URL canonicalization, relative-link resolution, redirect validation, and private-network blocking.
@@ -28,7 +31,7 @@ Open <http://127.0.0.1:5000>. The compiled frontend is committed under `WebPath 
 
 ## Crawl websites
 
-Enter a complete HTTP or HTTPS URL in the sidebar, choose a depth, and select **Launch crawl**. The button remains available while other work is running, so multiple requests can crawl concurrently. Select the live crawl badge in the top bar to inspect current work, and press Escape or select outside the drawer to close it.
+Enter a complete HTTP or HTTPS URL in the sidebar, choose a depth, and select **Launch crawl**. The button remains available while other work is running, so multiple requests can crawl concurrently. Submissions create durable background jobs that return immediately, queue for a bounded worker pool, and can be cancelled from the crawl monitor; servers without the job API fall back to the synchronous crawl endpoint automatically. Select the live crawl badge in the top bar to inspect current work, and press Escape or select outside the drawer to close it.
 
 The crawler records every discovered link as a graph relationship, but it fetches at most the configured page limit for each search. Depth controls how many breadth-first waves are fetched rather than imposing a rendering limit.
 
@@ -76,6 +79,8 @@ The server binds to `127.0.0.1` and runs without debug mode by default. The foll
 - `WEBPATH_INGEST_TOKEN`, when configured, is required as `X-Ingest-Token` for agent ingestion.
 - `WEBPATH_EVENTS_TOKEN` optionally protects the `/ws` live-event stream.
 - `WEBPATH_EVENT_HISTORY_SIZE`, `WEBPATH_EVENT_QUEUE_SIZE`, `WEBPATH_EVENT_BATCH_SIZE`, and `WEBPATH_EVENT_HEARTBEAT_SECONDS` control live-event replay, subscriber buffering, delta batching, and heartbeats.
+- `WEBPATH_CRAWL_JOB_WORKERS` sets the background crawl worker count (default 2), and `WEBPATH_CRAWL_JOB_PROGRESS_INTERVAL` controls how often durable job progress is written (default 0.25 seconds).
+- `WEBPATH_GRAPH_SNAPSHOT_TTL` sets how many seconds a progressive graph snapshot token remains valid (default 600).
 - `WEBPATH_CORS_ORIGINS` defines a comma-separated list of trusted API origins.
 - `WEBPATH_MAX_CRAWL_DEPTH`, `WEBPATH_MAX_CRAWL_PAGES`, `WEBPATH_CRAWL_CONCURRENCY`, `WEBPATH_CRAWL_TIMEOUT`, and `WEBPATH_MAX_RESPONSE_BYTES` define crawler limits.
 - `WEBPATH_HOST`, `WEBPATH_PORT`, and `WEBPATH_DEBUG` control the local server.
@@ -99,6 +104,6 @@ cd "WebPath Explorer\frontend"
 npm run build
 ```
 
-The current graph renders efficiently because drawing is batched on the GPU. End-to-end million-item operation will still require incremental binary graph transfer, append-only or capacity-grown GPU buffers, and batched background database writes so that JSON serialization, full CPU model reconstruction, and SQLite write throughput do not become the limiting stages.
+The current graph renders efficiently because drawing is batched on the GPU and live growth uploads only changed buffer ranges. End-to-end million-item operation will still require a binary or columnar graph transport and batched background database writes so that JSON parsing and SQLite write throughput do not become the limiting stages.
 
 See [Architecture and scaling](WebPath%20Explorer/docs/architecture.md) for the detailed system boundaries and roadmap.

@@ -325,6 +325,70 @@ export class ShallotGraphRenderer {
     if (this.device) this.uploadModel(model);
   }
 
+  /**
+   * Upload only the node and edge ranges the model marked dirty since the
+   * last sync. GPU buffers are replaced (and bind groups rebuilt) only when
+   * the model grew its typed-array capacity.
+   */
+  syncModel(): void {
+    if (!this.device || !this.model || !this.model.dirty) return;
+    const ranges = this.model.consumeDirty();
+    if (
+      ranges.resized ||
+      !this.positions ||
+      this.positions.size < this.model.positions.byteLength ||
+      !this.edges ||
+      this.edges.size < this.model.edgeIndices.byteLength
+    ) {
+      this.uploadModel(this.model);
+      return;
+    }
+    this.ensureBuffers();
+    const queue = this.device.queue;
+    if (ranges.nodeStart >= 0) {
+      const start = ranges.nodeStart;
+      const end = ranges.nodeEnd;
+      if (this.positions) {
+        queue.writeBuffer(
+          this.positions,
+          start * 8,
+          this.model.positions.subarray(start * 2, end * 2) as Float32Array<ArrayBuffer>,
+        );
+      }
+      if (this.positions3D) {
+        queue.writeBuffer(
+          this.positions3D,
+          start * 16,
+          this.model.positions3D.subarray(start * 4, end * 4) as Float32Array<ArrayBuffer>,
+        );
+      }
+      if (this.colors) {
+        queue.writeBuffer(
+          this.colors,
+          start * 16,
+          this.model.colors.subarray(start * 4, end * 4) as Float32Array<ArrayBuffer>,
+        );
+      }
+      if (this.meta) {
+        queue.writeBuffer(
+          this.meta,
+          start * 16,
+          this.model.meta.subarray(start * 4, end * 4) as Float32Array<ArrayBuffer>,
+        );
+      }
+    }
+    if (ranges.edgeStart >= 0 && this.edges) {
+      queue.writeBuffer(
+        this.edges,
+        ranges.edgeStart * 8,
+        this.model.edgeIndices.subarray(
+          ranges.edgeStart * 2,
+          ranges.edgeEnd * 2,
+        ) as Uint32Array<ArrayBuffer>,
+      );
+    }
+  }
+
   updateMeta(): void {
     if (!this.device || !this.model || !this.meta) return;
     this.device.queue.writeBuffer(this.meta, 0, this.model.meta as Float32Array<ArrayBuffer>);
@@ -518,7 +582,7 @@ export class ShallotGraphRenderer {
       (this.uniform?.size ?? 0);
     return {
       nodeCount: this.model?.nodes.length ?? 0,
-      edgeCount: (this.model?.edgeIndices.length ?? 0) / 2,
+      edgeCount: this.model?.edgeCount ?? 0,
       gpuBytes,
     };
   }
@@ -689,6 +753,7 @@ export class ShallotGraphRenderer {
       },
       execute: (ctx: ExecutionContext) => {
         if (!this.model || !this.nodePipeline || !this.edgePipeline || !this.uniform) return;
+        this.syncModel();
         if (this.bindGeneration !== this.bufferGeneration) this.rebuildBindGroups();
         if (!this.nodeBindGroup || !this.edgeBindGroup) return;
         const canvas = ctx.context.canvas as HTMLCanvasElement;
@@ -738,10 +803,10 @@ export class ShallotGraphRenderer {
           },
           timestampWrites: ctx.timestampWrites?.("WebPath graph"),
         });
-        if (this.model.edgeIndices.length) {
+        if (this.model.edgeCount) {
           pass.setPipeline(this.edgePipeline);
           pass.setBindGroup(0, this.edgeBindGroup);
-          pass.draw(2, this.model.edgeIndices.length / 2);
+          pass.draw(2, this.model.edgeCount);
         }
         if (this.model.nodes.length) {
           pass.setPipeline(this.nodePipeline);

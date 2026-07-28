@@ -8,7 +8,8 @@ WebPath Explorer separates ingestion, storage and query, live delivery, CPU-side
 Manual crawl ----\
                   +--> validation and canonicalization --> SQLite research graph
 AI agent batch --/                                         |
-                  |                                        +--> /api/graph snapshot
+                  |                                        +--> /api/graph/v2 progressive snapshot
+                  |                                        +--> /api/graph legacy snapshot
                   +---------------------------------------->+--> /ws graph deltas
                                                            |
                                                            v
@@ -33,9 +34,11 @@ SQLite is a practical local-first store for the current milestone. At much large
 
 ## Crawl boundary
 
-`POST /api/search` validates the starting URL, creates a durable search record, and performs a bounded breadth-first crawl. A crawl uses one asynchronous HTTP session and a semaphore-controlled request pool, while Flask can serve multiple crawl requests concurrently.
+`POST /api/crawls` validates the starting URL, creates a durable crawl-job record, and returns HTTP 202 immediately with a `Location` header. A bounded pool of worker threads (`WEBPATH_CRAWL_JOB_WORKERS`, default two) claims queued jobs atomically and runs each bounded breadth-first crawl with one asynchronous HTTP session and a semaphore-controlled request pool. Durable progress is coalesced to roughly four writes per second, and `GET /api/crawls` and `GET /api/crawls/<job_id>` expose queued, running, and terminal states so the browser can rebuild its crawl monitor after a refresh.
 
-The browser no longer imposes a single-crawl lock. Each submission is tracked independently, and the WebSocket event identity keeps its status and progress separate from every other crawl.
+`DELETE /api/crawls/<job_id>` cancels idempotently: a queued job becomes `cancelled`, a running job becomes `cancel_requested`, and the crawler cooperatively abandons its in-flight fetch wave before publishing `crawl_cancelled`. Interrupted `running` jobs are requeued when a process starts, interrupted `cancel_requested` jobs become cancelled, and their associated search rows are marked failed, so a restart never loses or duplicates work.
+
+`POST /api/search` remains available as the synchronous compatibility path, and the browser falls back to it automatically when the job API is absent.
 
 `tools/batch_crawl.py` orchestrates many API requests with a second, cross-crawl concurrency limit. It applies a finite request timeout, caps connection establishment time, retries only connector failures and transient HTTP responses, releases its semaphore before retry backoff, and never automatically retries a timed-out POST because the server may still be processing that crawl.
 
@@ -43,9 +46,11 @@ Cross-crawl concurrency multiplies the HTTP concurrency inside each crawl. This 
 
 ## Query boundary
 
-`GET /api/graph` returns the complete graph by default because Shallot is designed to render very large typed buffers. Callers can still request bounded slices with `node_limit`, `edge_limit`, filters, root-node neighborhoods, and keyset pagination.
+`GET /api/graph/v2/manifest` creates an opaque snapshot token that captures node, edge, and observation high-water marks in one short read transaction, binds query, domain, kind, session, search, and root-neighborhood filters to the token, and records the live-event sequence current at manifest time. `GET /api/graph/v2/nodes` and `GET /api/graph/v2/edges` then page the snapshot with independent keyset cursors: the client finishes the node phase before starting the edge phase, which preserves edges whose endpoints land in different node chunks. Pages never hold a long SQLite read transaction, so paging cannot block WAL checkpoints, and records appended after the manifest are excluded by the high-water marks. Expired or unknown tokens return HTTP 409, unknown roots return HTTP 404, and invalid cursors or limits return HTTP 400.
 
-Renderer capacity and transfer capacity are separate concerns. An unlimited JSON response is convenient and performs well at the current graph size, but a future million-item view should stream binary or columnar pages into capacity-grown buffers instead of allocating and parsing one enormous JSON document.
+While a snapshot loads, the browser buffers WebSocket events whose sequence exceeds the manifest's recorded sequence and replays them after the edge phase, so live growth during the load is neither lost nor applied twice. `GET /api/graph` remains unchanged as the legacy fallback and still returns the complete graph by default with optional limits, filters, neighborhoods, and keyset pagination.
+
+Renderer capacity and transfer capacity are separate concerns. Snapshot paging removes the single enormous JSON response, and a future million-item view should additionally stream binary or columnar pages that map directly into typed arrays.
 
 ## Live event boundary
 
@@ -53,11 +58,11 @@ Renderer capacity and transfer capacity are separate concerns. An unlimited JSON
 
 Agent ingestion publishes `graph_changed`, which causes connected viewers to resynchronize without polling. Events carry monotonic sequence numbers, reconnecting browsers request events after the last sequence they applied, and bounded subscriber queues and replay history prevent a slow tab from blocking ingestion.
 
-The current live path rebuilds `GraphModel` and replaces GPU buffers after a coalesced delta. This keeps the implementation simple and correct, but it is an O(nodes + edges) step and will become more expensive than rendering at very large scales. The next implementation should append into capacity-doubled typed and GPU buffers and update only the changed ranges.
+Live deltas now append into the incremental `GraphModel` instead of rebuilding it. The model deduplicates nodes and edges, queues edges whose endpoints have not arrived yet, and reports dirty index ranges, so a coalesced burst uploads only the changed typed-array ranges to the GPU rather than replacing every buffer.
 
 ## CPU graph model
 
-`GraphModel` converts API records into compact typed arrays for positions, colors, state flags, and edge endpoints. It maintains node identity maps, domain metadata, deterministic layout data, filter state, selection details, and a spatial grid used for low-latency hover and selection.
+`GraphModel` converts API records into geometrically grown typed arrays for positions, colors, state flags, and edge endpoints. Nodes and edges are append-only: the initial dataset, progressive snapshot pages, and live deltas all flow through the same append path, which preserves filter and selection state, deduplicates by node identity and edge key, and queues edges whose endpoints have not arrived yet. Adjacency is maintained as per-node linked lists so inserting a connection is O(1), and the spatial grid used for low-latency hover and selection is extended incrementally with every appended node.
 
 The 2D layout provides a stable overview. The 3D layout stores independent XYZ coordinates, places deterministic site centers throughout a volume, and branches pages according to domains, subdomains, URL paths, crawl depth, and entity kind. Small deterministic offsets prevent exact overlap without turning the graph into random visual noise.
 
@@ -71,6 +76,7 @@ Graph records are not represented as one Shallot entity per node. The renderer i
 
 - One storage buffer contains aligned 2D positions, and another contains aligned XYZ positions packed as four floats per node.
 - Additional storage buffers contain colors, visibility and interaction state, and pairs of node indices for edges.
+- Buffers are sized to the model's typed-array capacity and grow geometrically; between growth steps the renderer calls `GPUQueue.writeBuffer` only for the dirty node and edge ranges the model reports, and bind groups are rebuilt only when a buffer is actually replaced.
 - One instanced line draw renders every visible edge.
 - One instanced billboard-quad draw renders every visible circular node.
 - The 3D view uses an orbit camera, perspective projection, meaningful volumetric positions, camera-facing billboards, and a resize-aware depth texture.
@@ -106,10 +112,10 @@ The current renderer is optimized for a low draw-call count and performs comfort
 
 The project should complete the following milestones before claiming end-to-end million-item performance:
 
-1. Replace full JSON snapshots with cursor-based binary or columnar streaming.
-2. Append live deltas into capacity-doubled CPU and GPU buffers and write only changed ranges.
-3. Move crawl execution into durable background jobs with cancellation, retries, rate policies, and a dedicated batched database writer.
-4. Add GPU timestamp and interaction benchmarks at 100,000, 1 million, and 3 million nodes and edges.
+1. Replace paged JSON transport with binary or columnar streaming that maps directly into typed arrays.
+2. Batch crawler database writes per fetched page or wave, or route them through a dedicated writer queue, so per-link transactions stop limiting ingestion.
+3. Add crawl-job retries, rate policies, and per-domain politeness windows on top of the durable job queue.
+4. Add GPU timestamp and interaction benchmarks at 100,000, 1 million, and 3 million nodes and edges. The CPU model path already builds 100,000 nodes and edges in roughly two seconds and appends ten thousand more in tens of milliseconds in an environment-specific Node.js measurement.
 5. Replace or augment CPU spatial picking when measured density makes it the interaction bottleneck.
 6. Add server-side projections for domain, time, agent, claim, and semantic search.
 7. Add snapshots, content hashes, citations, claims, contradiction links, change detection, freshness scoring, retention, export, and backup controls.

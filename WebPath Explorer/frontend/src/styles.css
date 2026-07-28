@@ -412,13 +412,19 @@ kbd {
 }
 
 .crawl-activity.is-running,
-.crawl-activity.is-pending {
+.crawl-activity.is-pending,
+.crawl-activity.is-queued,
+.crawl-activity.is-cancelling {
   border-color: rgba(245, 185, 95, 0.19);
   background: linear-gradient(120deg, rgba(245, 185, 95, 0.055), rgba(255, 255, 255, 0.018));
 }
 
 .crawl-activity.is-failed {
   border-color: rgba(255, 125, 134, 0.2);
+}
+
+.crawl-activity.is-cancelled {
+  opacity: 0.72;
 }
 
 .crawl-activity-head > div {
@@ -454,12 +460,31 @@ kbd {
 }
 
 .is-running .crawl-state,
-.is-pending .crawl-state {
+.is-pending .crawl-state,
+.is-queued .crawl-state,
+.is-cancelling .crawl-state {
   color: var(--amber);
 }
 
 .is-failed .crawl-state {
   color: var(--danger);
+}
+
+.crawl-cancel-button {
+  margin-top: 10px;
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 125, 134, 0.32);
+  border-radius: 8px;
+  background: rgba(255, 125, 134, 0.07);
+  color: var(--danger);
+  cursor: pointer;
+  font: 600 10px "DM Mono", monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.crawl-cancel-button:hover {
+  background: rgba(255, 125, 134, 0.16);
 }
 
 .crawl-route {

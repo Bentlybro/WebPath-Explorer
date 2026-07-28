@@ -1,10 +1,16 @@
 import type {
+  CrawlJob,
+  CrawlJobList,
+  CrawlJobStatus,
+  CrawlJobSubmission,
   CrawlRequest,
   CrawlResponse,
   GraphDataset,
   GraphEdge,
+  GraphManifest,
   GraphNode,
   GraphPage,
+  GraphPageEnvelope,
   GraphQuery,
   GraphStats,
   SearchRecord,
@@ -159,6 +165,112 @@ export async function fetchGraph(
       .catch(() => undefined),
   ]);
   return normalizePage(page, backendStats);
+}
+
+function manifestParamsFor(query: GraphQuery): URLSearchParams {
+  const params = new URLSearchParams();
+  if (query.query) params.set("q", query.query);
+  if (query.domain) params.set("domain", query.domain);
+  if (query.kind) params.set("kind", query.kind);
+  if (query.session) params.set("session", query.session);
+  if (query.search !== undefined) params.set("search", String(query.search));
+  if (query.root !== undefined) params.set("root", String(query.root));
+  return params;
+}
+
+export async function fetchBackendStats(signal?: AbortSignal): Promise<BackendStats | null> {
+  try {
+    const response = await fetch("/api/stats", { signal });
+    return await readJson<BackendStats>(response);
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchGraphManifest(
+  query: GraphQuery = {},
+  signal?: AbortSignal,
+): Promise<GraphManifest | null> {
+  const response = await fetch(`/api/graph/v2/manifest?${manifestParamsFor(query)}`, {
+    signal,
+  });
+  // Older servers without the v2 routes fall back to the legacy graph API.
+  if (response.status === 404) return null;
+  return readJson<GraphManifest>(response);
+}
+
+export async function fetchGraphNodePage(
+  snapshot: string,
+  after: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<GraphPageEnvelope<GraphNode>> {
+  const params = new URLSearchParams({
+    snapshot,
+    after: String(after),
+    limit: String(limit),
+  });
+  return readJson<GraphPageEnvelope<GraphNode>>(
+    await fetch(`/api/graph/v2/nodes?${params}`, { signal }),
+  );
+}
+
+export async function fetchGraphEdgePage(
+  snapshot: string,
+  after: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<GraphPageEnvelope<GraphEdge>> {
+  const params = new URLSearchParams({
+    snapshot,
+    after: String(after),
+    limit: String(limit),
+  });
+  return readJson<GraphPageEnvelope<GraphEdge>>(
+    await fetch(`/api/graph/v2/edges?${params}`, { signal }),
+  );
+}
+
+export interface CrawlLaunchResult {
+  kind: "job" | "legacy";
+  job?: CrawlJob;
+  legacy?: CrawlResponse;
+}
+
+export async function launchCrawl(request: CrawlRequest): Promise<CrawlLaunchResult> {
+  const response = await fetch("/api/crawls", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  // Servers without the durable job API fall back to the synchronous crawl.
+  if (response.status === 404 || response.status === 405) {
+    return { kind: "legacy", legacy: await startCrawl(request) };
+  }
+  const submission = await readJson<CrawlJobSubmission>(response);
+  return { kind: "job", job: submission.job };
+}
+
+export async function fetchCrawlJobs(
+  options: { status?: CrawlJobStatus; limit?: number } = {},
+): Promise<CrawlJob[]> {
+  const params = new URLSearchParams();
+  if (options.status) params.set("status", options.status);
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  const suffix = params.size ? `?${params}` : "";
+  const response = await fetch(`/api/crawls${suffix}`);
+  if (response.status === 404) return [];
+  const list = await readJson<CrawlJobList>(response);
+  return Array.isArray(list.jobs) ? list.jobs : [];
+}
+
+export async function cancelCrawlJob(jobId: string): Promise<CrawlJob | null> {
+  const response = await fetch(`/api/crawls/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+  });
+  if (response.status === 404) return null;
+  const result = await readJson<{ job: CrawlJob }>(response);
+  return result.job;
 }
 
 export async function startCrawl(request: CrawlRequest): Promise<CrawlResponse> {

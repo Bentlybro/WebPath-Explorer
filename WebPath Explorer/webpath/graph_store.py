@@ -217,6 +217,24 @@ class GraphStore:
                     FOREIGN KEY(source_node_id) REFERENCES nodes(id),
                     FOREIGN KEY(target_node_id) REFERENCES nodes(id)
                 );
+                CREATE TABLE IF NOT EXISTS crawl_jobs (
+                    id TEXT PRIMARY KEY,
+                    starting_url TEXT NOT NULL,
+                    max_depth INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    search_id INTEGER,
+                    pages_visited INTEGER NOT NULL DEFAULT 0,
+                    edges_observed INTEGER NOT NULL DEFAULT 0,
+                    current_depth INTEGER NOT NULL DEFAULT 0,
+                    current_url TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    cancel_requested_at TEXT,
+                    FOREIGN KEY(search_id) REFERENCES searches(id)
+                );
                 CREATE INDEX IF NOT EXISTS idx_nodes_canonical_url
                     ON nodes(canonical_url);
                 CREATE INDEX IF NOT EXISTS idx_nodes_domain_id
@@ -237,6 +255,8 @@ class GraphStore:
                     ON observations(search_id, id);
                 CREATE INDEX IF NOT EXISTS idx_observations_source
                     ON observations(source_node_id, id);
+                CREATE INDEX IF NOT EXISTS idx_crawl_jobs_status_created
+                    ON crawl_jobs(status, created_at);
                 """
             )
             # A unique index is safe on new databases.  Old databases may have
@@ -465,6 +485,245 @@ class GraphStore:
                 "UPDATE searches SET status = ?, completed_at = ? WHERE id = ?",
                 (status, utc_now(), search_id),
             )
+
+    def create_crawl_job(
+        self, job_id: str, starting_url: str, max_depth: int
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self.write_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO crawl_jobs
+                    (id, starting_url, max_depth, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'queued', ?, ?)
+                """,
+                (job_id, starting_url, max_depth, now, now),
+            )
+            row = conn.execute(
+                "SELECT * FROM crawl_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        assert row is not None
+        return self._crawl_job_dict(row)
+
+    def recover_crawl_jobs(self) -> dict[str, int]:
+        """Make interrupted jobs claimable after a process restart."""
+        now = utc_now()
+        with self.write_connection() as conn:
+            conn.execute(
+                """
+                UPDATE searches SET status = 'failed', completed_at = ?
+                WHERE id IN (
+                    SELECT search_id FROM crawl_jobs
+                    WHERE status = 'running' AND search_id IS NOT NULL
+                )
+                """,
+                (now,),
+            )
+            requeued = conn.execute(
+                """
+                UPDATE crawl_jobs
+                SET status = 'queued', search_id = NULL, started_at = NULL,
+                    pages_visited = 0, edges_observed = 0, current_depth = 0,
+                    current_url = NULL, updated_at = ?,
+                    error = 'worker process restarted before completion'
+                WHERE status = 'running'
+                """,
+                (now,),
+            ).rowcount
+            cancelled = conn.execute(
+                """
+                UPDATE crawl_jobs
+                SET status = 'cancelled', updated_at = ?, finished_at = ?
+                WHERE status = 'cancel_requested'
+                """,
+                (now, now),
+            ).rowcount
+        return {"requeued": int(requeued), "cancelled": int(cancelled)}
+
+    def claim_next_crawl_job(self) -> dict[str, Any] | None:
+        now = utc_now()
+        with self.write_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id FROM crawl_jobs
+                WHERE status = 'queued'
+                ORDER BY created_at, id
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            job_id = str(row["id"])
+            updated = conn.execute(
+                """
+                UPDATE crawl_jobs
+                SET status = 'running', started_at = COALESCE(started_at, ?),
+                    updated_at = ?, error = NULL
+                WHERE id = ? AND status = 'queued'
+                """,
+                (now, now, job_id),
+            )
+            if updated.rowcount != 1:
+                return None
+            claimed = conn.execute(
+                "SELECT * FROM crawl_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return self._crawl_job_dict(claimed) if claimed else None
+
+    def attach_crawl_job_search(self, job_id: str, search_id: int) -> None:
+        with self.write_connection() as conn:
+            conn.execute(
+                """
+                UPDATE crawl_jobs SET search_id = ?, updated_at = ?
+                WHERE id = ? AND status IN ('running', 'cancel_requested')
+                """,
+                (search_id, utc_now(), job_id),
+            )
+
+    def update_crawl_job_progress(
+        self,
+        job_id: str,
+        *,
+        pages_visited: int,
+        edges_observed: int,
+        current_depth: int,
+        current_url: str | None,
+    ) -> None:
+        with self.write_connection() as conn:
+            conn.execute(
+                """
+                UPDATE crawl_jobs SET
+                    pages_visited = MAX(pages_visited, ?),
+                    edges_observed = MAX(edges_observed, ?),
+                    current_depth = MAX(current_depth, ?),
+                    current_url = COALESCE(?, current_url),
+                    updated_at = ?
+                WHERE id = ? AND status IN ('running', 'cancel_requested')
+                """,
+                (
+                    pages_visited,
+                    edges_observed,
+                    current_depth,
+                    current_url,
+                    utc_now(),
+                    job_id,
+                ),
+            )
+
+    def finish_crawl_job(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        pages_visited: int | None = None,
+        edges_observed: int | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any] | None:
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("invalid terminal crawl-job status")
+        now = utc_now()
+        with self.write_connection() as conn:
+            current = conn.execute(
+                "SELECT status FROM crawl_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if current is None:
+                return None
+            final_status = (
+                "cancelled"
+                if current["status"] == "cancel_requested"
+                else status
+            )
+            conn.execute(
+                """
+                UPDATE crawl_jobs SET
+                    status = ?,
+                    pages_visited = MAX(pages_visited, COALESCE(?, pages_visited)),
+                    edges_observed = MAX(edges_observed, COALESCE(?, edges_observed)),
+                    error = ?,
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE id = ?
+                """,
+                (
+                    final_status,
+                    pages_visited,
+                    edges_observed,
+                    error,
+                    now,
+                    now,
+                    job_id,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM crawl_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return self._crawl_job_dict(row) if row else None
+
+    def request_crawl_job_cancel(self, job_id: str) -> dict[str, Any] | None:
+        now = utc_now()
+        with self.write_connection() as conn:
+            row = conn.execute(
+                "SELECT status FROM crawl_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            status = str(row["status"])
+            if status == "queued":
+                conn.execute(
+                    """
+                    UPDATE crawl_jobs SET status = 'cancelled',
+                        cancel_requested_at = ?, updated_at = ?, finished_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, now, job_id),
+                )
+            elif status == "running":
+                conn.execute(
+                    """
+                    UPDATE crawl_jobs SET status = 'cancel_requested',
+                        cancel_requested_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, job_id),
+                )
+            updated = conn.execute(
+                "SELECT * FROM crawl_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return self._crawl_job_dict(updated) if updated else None
+
+    def get_crawl_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM crawl_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return self._crawl_job_dict(row) if row else None
+
+    def list_crawl_jobs(
+        self, *, status: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        with self.connection() as conn:
+            if status:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM crawl_jobs WHERE status = ?
+                    ORDER BY created_at DESC, id DESC LIMIT ?
+                    """,
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM crawl_jobs
+                    ORDER BY created_at DESC, id DESC LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [self._crawl_job_dict(row) for row in rows]
+
+    @staticmethod
+    def _crawl_job_dict(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
 
     def ingest_agent_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Ingest one provenance-rich agent research batch atomically.
@@ -956,6 +1215,7 @@ class GraphStore:
         with self.write_connection() as conn:
             # Children are deleted first because foreign keys are enforced.
             for table in (
+                "crawl_jobs",
                 "observations",
                 "searches",
                 "research_sessions",

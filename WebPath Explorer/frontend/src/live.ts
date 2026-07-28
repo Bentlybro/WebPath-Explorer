@@ -7,6 +7,8 @@ export interface CrawlIdentity {
   jobId?: NodeId;
   searchId?: NodeId;
   url?: string;
+  /** Broker sequence for ordering against a graph snapshot manifest. */
+  sequence?: number;
 }
 
 export type LiveGraphEvent =
@@ -30,11 +32,12 @@ export type LiveGraphEvent =
       depth?: number;
       currentUrl?: string;
     } & CrawlIdentity)
-  | { type: "graph-changed"; reason?: string }
+  | { type: "graph-changed"; reason?: string; sequence?: number }
   | ({ type: "crawl-complete"; message?: string } & CrawlIdentity)
+  | ({ type: "crawl-cancelled"; message?: string } & CrawlIdentity)
   | ({ type: "crawl-error"; message: string } & CrawlIdentity)
-  | { type: "hello" }
-  | { type: "unknown"; raw: unknown };
+  | { type: "hello"; sequence?: number }
+  | { type: "unknown"; raw: unknown; sequence?: number };
 
 export interface LiveGraphSocketOptions {
   endpoints?: string[];
@@ -79,6 +82,7 @@ function identity(source: JsonRecord): CrawlIdentity {
     searchId:
       typeof searchId === "string" || typeof searchId === "number" ? searchId : undefined,
     url: stringValue(first(source, "url", "starting_url", "startingUrl")),
+    sequence: numberValue(first(source, "sequence", "seq")),
   };
 }
 
@@ -189,6 +193,7 @@ export function normalizeLiveEvent(raw: unknown): LiveGraphEvent {
     return {
       type: "graph-changed",
       reason: stringValue(first(merged, "reason", "message")),
+      sequence: id.sequence,
     };
   }
   if (["crawl-complete", "crawl-completed", "complete", "completed", "done"].includes(rawType)) {
@@ -196,6 +201,13 @@ export function normalizeLiveEvent(raw: unknown): LiveGraphEvent {
       type: "crawl-complete",
       ...id,
       message: stringValue(first(merged, "message")),
+    };
+  }
+  if (["crawl-cancelled", "crawl-canceled", "cancelled", "canceled"].includes(rawType)) {
+    return {
+      type: "crawl-cancelled",
+      ...id,
+      message: stringValue(first(merged, "message", "error", "detail")),
     };
   }
   if (["crawl-error", "crawl-failed", "error", "failed"].includes(rawType)) {

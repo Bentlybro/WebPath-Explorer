@@ -73,6 +73,66 @@ export interface GraphQuery {
   cursor?: string;
 }
 
+export interface GraphManifest {
+  protocol: string;
+  snapshot: string;
+  node_high_water: number;
+  edge_high_water: number;
+  event_sequence: number;
+  counts: { nodes: number; edges: number };
+  recommended_limits: { nodes: number; edges: number };
+  ttl_seconds: number;
+}
+
+export interface GraphPageEnvelope<T> {
+  protocol: string;
+  snapshot: string;
+  type: "nodes" | "edges";
+  items: T[];
+  page: {
+    after: number;
+    next_after: number | null;
+    done: boolean;
+    limit: number;
+    returned: number;
+  };
+}
+
+export type CrawlJobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancel_requested"
+  | "cancelled";
+
+export interface CrawlJob {
+  id: string;
+  status: CrawlJobStatus;
+  starting_url: string;
+  max_depth: number;
+  search_id: number | null;
+  pages_visited: number;
+  edges_observed: number;
+  current_depth: number;
+  current_url: string | null;
+  error: string | null;
+  created_at?: string;
+  started_at?: string | null;
+  updated_at?: string;
+  finished_at?: string | null;
+}
+
+export interface CrawlJobList {
+  jobs: CrawlJob[];
+  count: number;
+}
+
+export interface CrawlJobSubmission {
+  job: CrawlJob;
+  location: string;
+}
+
 export interface CrawlRequest {
   starting_url: string;
   max_depth: number;
@@ -97,7 +157,9 @@ export interface GraphDataset {
   edges: GraphEdge[];
   stats: GraphStats;
   truncated: boolean;
-  source: "graph" | "legacy";
+  source: "graph" | "graph-v2" | "legacy";
+  /** WebSocket sequence captured by the snapshot manifest, when known. */
+  eventSequence?: number;
 }
 
 export interface NodeView {

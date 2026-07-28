@@ -7,6 +7,7 @@ server.  Debug mode and public binding are opt-in environment settings.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import ipaddress
 import json
@@ -15,6 +16,7 @@ import queue
 import socket
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -26,6 +28,12 @@ from flask_sock import Sock
 from simple_websocket import ConnectionClosed
 
 from webpath.graph_store import GraphStore, canonicalize_url, utc_now
+from webpath.crawl_jobs import CrawlCancelled, CrawlJobManager, JOB_STATUSES
+from webpath.graph_delivery import (
+    GraphDelivery,
+    SnapshotUnavailable,
+    UnknownRoot,
+)
 from webpath.live_events import EVENT_PROTOCOL, EventBroker
 
 
@@ -66,6 +74,7 @@ def _publish_graph_delta(
     events: EventBroker | None,
     *,
     search_id: int,
+    job_id: str | None = None,
     nodes: list[dict[str, Any]],
     edges: list[dict[str, Any]],
     pages_visited: int,
@@ -110,6 +119,7 @@ def _publish_graph_delta(
         events.publish(
             "graph_delta",
             search_id=search_id,
+            job_id=job_id,
             nodes=node_batch,
             edges=edge_batch,
             pages_visited=pages_visited,
@@ -230,6 +240,9 @@ async def crawl(
     limits: CrawlLimits,
     events: EventBroker | None = None,
     event_batch_size: int = 500,
+    job_id: str | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
+    on_progress: Callable[..., None] | None = None,
 ) -> dict[str, int]:
     """Crawl in bounded breadth-first waves using one shared HTTP session."""
     starting_url = await validate_public_url(starting_url)
@@ -242,8 +255,37 @@ async def crawl(
     timeout = aiohttp.ClientTimeout(total=limits.request_timeout)
     headers = {"User-Agent": "WebPathExplorer/2.0 (+local research graph)"}
 
+    def raise_if_cancelled() -> None:
+        if cancel_requested is not None and cancel_requested():
+            raise CrawlCancelled("crawl cancellation requested")
+
+    async def gather_fetches(fetches):
+        gather_future = asyncio.gather(*fetches)
+        if cancel_requested is None:
+            return await gather_future
+
+        async def watch_cancellation() -> None:
+            while not cancel_requested():
+                await asyncio.sleep(0.1)
+
+        cancellation = asyncio.create_task(watch_cancellation())
+        done, _pending = await asyncio.wait(
+            {gather_future, cancellation},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancellation in done:
+            gather_future.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await gather_future
+            raise CrawlCancelled("crawl cancellation requested")
+        cancellation.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cancellation
+        return gather_future.result()
+
     async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
         for _depth in range(1, max_depth + 1):
+            raise_if_cancelled()
             if not current_wave or page_count >= limits.max_pages:
                 break
 
@@ -259,9 +301,12 @@ async def crawl(
                         return url, None, str(exc) or type(exc).__name__
 
             remaining = limits.max_pages - page_count
-            results = await asyncio.gather(*(fetch(url) for url in current_wave[:remaining]))
+            results = await gather_fetches(
+                fetch(url) for url in current_wave[:remaining]
+            )
             next_wave: list[str] = []
             for requested_url, result, fetch_error in results:
+                raise_if_cancelled()
                 if requested_url in visited:
                     continue
                 visited.add(requested_url)
@@ -278,6 +323,7 @@ async def crawl(
                     _publish_graph_delta(
                         events,
                         search_id=search_id,
+                        job_id=job_id,
                         nodes=list(delta_nodes.values()),
                         edges=[],
                         pages_visited=page_count,
@@ -292,6 +338,13 @@ async def crawl(
                         ],
                         batch_size=event_batch_size,
                     )
+                    if on_progress is not None:
+                        on_progress(
+                            pages_visited=page_count,
+                            edges_observed=edge_count,
+                            current_depth=_depth,
+                            current_url=requested_url,
+                        )
                     continue
                 final_url, title, links = result
                 source_id = store.upsert_node(
@@ -329,6 +382,7 @@ async def crawl(
                         }
                     )
                 for link in links:
+                    raise_if_cancelled()
                     target_id = store.upsert_node(link)
                     delta_nodes[target_id] = _live_node(target_id, link)
                     edge_id = store.upsert_edge(
@@ -356,6 +410,7 @@ async def crawl(
                 _publish_graph_delta(
                     events,
                     search_id=search_id,
+                    job_id=job_id,
                     nodes=list(delta_nodes.values()),
                     edges=delta_edges,
                     pages_visited=page_count,
@@ -364,6 +419,13 @@ async def crawl(
                     current_url=final_url,
                     batch_size=event_batch_size,
                 )
+                if on_progress is not None:
+                    on_progress(
+                        pages_visited=page_count,
+                        edges_observed=edge_count,
+                        current_depth=_depth,
+                        current_url=final_url,
+                    )
                 if page_count >= limits.max_pages:
                     break
             current_wave = next_wave
@@ -371,6 +433,7 @@ async def crawl(
                 events.publish(
                     "crawl_progress",
                     search_id=search_id,
+                    job_id=job_id,
                     depth=_depth,
                     pages_visited=page_count,
                     edges_observed=edge_count,
@@ -392,6 +455,10 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         MAX_CRAWL_PAGES=int(os.environ.get("WEBPATH_MAX_CRAWL_PAGES", 500)),
         CRAWL_CONCURRENCY=int(os.environ.get("WEBPATH_CRAWL_CONCURRENCY", 12)),
         CRAWL_TIMEOUT=float(os.environ.get("WEBPATH_CRAWL_TIMEOUT", 15)),
+        CRAWL_JOB_WORKERS=int(os.environ.get("WEBPATH_CRAWL_JOB_WORKERS", 2)),
+        CRAWL_JOB_PROGRESS_INTERVAL=float(
+            os.environ.get("WEBPATH_CRAWL_JOB_PROGRESS_INTERVAL", 0.25)
+        ),
         MAX_RESPONSE_BYTES=int(
             os.environ.get("WEBPATH_MAX_RESPONSE_BYTES", 2_000_000)
         ),
@@ -403,6 +470,9 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         EVENT_BATCH_SIZE=int(os.environ.get("WEBPATH_EVENT_BATCH_SIZE", 500)),
         EVENT_HEARTBEAT_SECONDS=float(
             os.environ.get("WEBPATH_EVENT_HEARTBEAT_SECONDS", 15)
+        ),
+        GRAPH_SNAPSHOT_TTL_SECONDS=float(
+            os.environ.get("WEBPATH_GRAPH_SNAPSHOT_TTL", 600)
         ),
     )
     if config:
@@ -416,6 +486,99 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         subscriber_queue_size=int(app.config["EVENT_QUEUE_SIZE"]),
     )
     app.extensions["event_broker"] = events
+    app.extensions["graph_delivery"] = GraphDelivery(
+        store,
+        ttl_seconds=float(app.config["GRAPH_SNAPSHOT_TTL_SECONDS"]),
+    )
+
+    limits = CrawlLimits(
+        max_pages=int(app.config["MAX_CRAWL_PAGES"]),
+        concurrency=int(app.config["CRAWL_CONCURRENCY"]),
+        request_timeout=float(app.config["CRAWL_TIMEOUT"]),
+        max_response_bytes=int(app.config["MAX_RESPONSE_BYTES"]),
+    )
+
+    def run_background_crawl(
+        job: dict[str, Any],
+        progress: Callable[..., None],
+        cancel_requested: Callable[[], bool],
+    ) -> dict[str, int]:
+        job_id = str(job["id"])
+        canonical = str(job["starting_url"])
+        max_depth = int(job["max_depth"])
+        search_id = store.create_legacy_search(canonical, max_depth)
+        store.attach_crawl_job_search(job_id, search_id)
+        events.publish(
+            "crawl_started",
+            search_id=search_id,
+            job_id=job_id,
+            url=canonical,
+            max_depth=max_depth,
+            limits={
+                "max_pages": limits.max_pages,
+                "concurrency": limits.concurrency,
+                "request_timeout": limits.request_timeout,
+                "max_response_bytes": limits.max_response_bytes,
+            },
+        )
+        try:
+            result = asyncio.run(
+                crawl(
+                    store,
+                    canonical,
+                    max_depth,
+                    search_id,
+                    limits,
+                    events=events,
+                    event_batch_size=int(app.config["EVENT_BATCH_SIZE"]),
+                    job_id=job_id,
+                    cancel_requested=cancel_requested,
+                    on_progress=progress,
+                )
+            )
+        except CrawlCancelled as exc:
+            store.complete_search(search_id, "cancelled")
+            events.publish(
+                "crawl_cancelled",
+                search_id=search_id,
+                job_id=job_id,
+                url=canonical,
+                message=str(exc),
+            )
+            raise
+        except Exception as exc:
+            store.complete_search(search_id, "failed")
+            events.publish(
+                "crawl_error",
+                search_id=search_id,
+                job_id=job_id,
+                url=canonical,
+                error=str(exc) or type(exc).__name__,
+            )
+            app.logger.exception("Background crawl failed")
+            raise
+        store.complete_search(search_id)
+        events.publish(
+            "crawl_completed",
+            search_id=search_id,
+            job_id=job_id,
+            url=canonical,
+            **result,
+        )
+        return result
+
+    configured_workers = int(app.config["CRAWL_JOB_WORKERS"])
+    if app.config.get("TESTING") and not (
+        config and "CRAWL_JOB_WORKERS" in config
+    ):
+        configured_workers = 0
+    crawl_jobs = CrawlJobManager(
+        store,
+        run_background_crawl,
+        worker_count=configured_workers,
+        progress_interval=float(app.config["CRAWL_JOB_PROGRESS_INTERVAL"]),
+    )
+    app.extensions["crawl_job_manager"] = crawl_jobs
     sock = Sock(app)
 
     @sock.route("/ws")
@@ -493,6 +656,79 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     @app.get("/")
     def index():
         return render_template("index.html")
+
+    @app.post("/api/crawls")
+    def create_crawl_job():
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            abort(400, description="a JSON object is required")
+        starting_url = data.get("starting_url")
+        if not starting_url:
+            abort(400, description="starting_url is required")
+        try:
+            max_depth = _bounded_int(
+                data.get("max_depth", 4),
+                "max_depth",
+                minimum=1,
+                maximum=int(current_app.config["MAX_CRAWL_DEPTH"]),
+            )
+            canonical = asyncio.run(validate_public_url(starting_url))
+        except ValueError as exc:
+            abort(400, description=str(exc))
+        manager: CrawlJobManager = current_app.extensions["crawl_job_manager"]
+        job = manager.submit(canonical, max_depth)
+        location = f"/api/crawls/{job['id']}"
+        response = jsonify({"job": job, "location": location})
+        response.status_code = 202
+        response.headers["Location"] = location
+        return response
+
+    @app.get("/api/crawls")
+    def list_crawl_jobs():
+        status = request.args.get("status")
+        if status and status not in JOB_STATUSES:
+            abort(400, description="invalid crawl-job status")
+        try:
+            limit = _bounded_int(
+                request.args.get("limit", 50),
+                "limit",
+                minimum=1,
+                maximum=200,
+            )
+        except ValueError as exc:
+            abort(400, description=str(exc))
+        active_store: GraphStore = current_app.extensions["graph_store"]
+        jobs = active_store.list_crawl_jobs(status=status, limit=limit)
+        return jsonify({"jobs": jobs, "count": len(jobs)})
+
+    @app.get("/api/crawls/<job_id>")
+    def get_crawl_job(job_id: str):
+        active_store: GraphStore = current_app.extensions["graph_store"]
+        job = active_store.get_crawl_job(job_id)
+        if job is None:
+            abort(404, description="crawl job was not found")
+        return jsonify({"job": job})
+
+    @app.delete("/api/crawls/<job_id>")
+    def cancel_crawl_job(job_id: str):
+        manager: CrawlJobManager = current_app.extensions["crawl_job_manager"]
+        job = manager.cancel(job_id)
+        if job is None:
+            abort(404, description="crawl job was not found")
+        status_code = 202 if job["status"] == "cancel_requested" else 200
+        return (
+            jsonify(
+                {
+                    "job": job,
+                    "message": (
+                        "crawl cancellation requested"
+                        if job["status"] == "cancel_requested"
+                        else f"crawl job is {job['status']}"
+                    ),
+                }
+            ),
+            status_code,
+        )
 
     @app.route("/api/search", methods=["GET", "POST"])
     def search():
@@ -687,6 +923,65 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                 },
             }
         )
+
+    @app.get("/api/graph/v2/manifest")
+    def graph_v2_manifest():
+        """Create an opaque snapshot token for progressive graph delivery.
+
+        The manifest captures append-stable high-water marks and binds every
+        filter to the token, so node and edge pages stay mutually consistent
+        while live crawls keep appending to the graph.
+        """
+        delivery: GraphDelivery = current_app.extensions["graph_delivery"]
+        active_events: EventBroker = current_app.extensions["event_broker"]
+        try:
+            manifest = delivery.create_manifest(
+                query=request.args.get("q"),
+                domain=request.args.get("domain"),
+                kind=request.args.get("kind"),
+                session=request.args.get("session"),
+                search=request.args.get("search"),
+                root=request.args.get("root"),
+                event_sequence=active_events.sequence,
+            )
+        except UnknownRoot:
+            abort(404, description="root URL is not in the graph")
+        except ValueError as exc:
+            abort(400, description=str(exc))
+        return jsonify(manifest)
+
+    def _graph_v2_page(phase: str):
+        """Serialize one bounded snapshot page for the node or edge phase."""
+        delivery: GraphDelivery = current_app.extensions["graph_delivery"]
+        token = request.args.get("snapshot", "")
+        try:
+            if phase == "nodes":
+                page = delivery.node_page(
+                    token,
+                    after=request.args.get("after", 0),
+                    limit=request.args.get("limit"),
+                )
+            else:
+                page = delivery.edge_page(
+                    token,
+                    after=request.args.get("after", 0),
+                    limit=request.args.get("limit"),
+                )
+        except SnapshotUnavailable:
+            return jsonify({"error": "snapshot_invalidated"}), 409
+        except ValueError as exc:
+            abort(400, description=str(exc))
+        return jsonify(page)
+
+    @app.get("/api/graph/v2/nodes")
+    def graph_v2_nodes():
+        """Page nodes independently with a node-ID keyset cursor."""
+        return _graph_v2_page("nodes")
+
+    @app.get("/api/graph/v2/edges")
+    def graph_v2_edges():
+        """Page edges independently with an edge-rowid keyset cursor."""
+        return _graph_v2_page("edges")
 
     @app.get("/api/stats")
     def get_stats():
