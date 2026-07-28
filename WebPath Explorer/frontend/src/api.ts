@@ -264,6 +264,27 @@ export async function fetchCrawlJobs(
   return Array.isArray(list.jobs) ? list.jobs : [];
 }
 
+export interface CrawlWorkerStatus {
+  workers: number;
+  threads: number;
+  active_jobs: number;
+  max_workers: number;
+}
+
+export async function fetchCrawlWorkers(): Promise<CrawlWorkerStatus> {
+  return readJson<CrawlWorkerStatus>(await fetch("/api/crawls/workers"));
+}
+
+export async function setCrawlWorkers(workers: number): Promise<CrawlWorkerStatus> {
+  return readJson<CrawlWorkerStatus>(
+    await fetch("/api/crawls/workers", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workers }),
+    }),
+  );
+}
+
 export async function cancelCrawlJob(jobId: string): Promise<CrawlJob | null> {
   const response = await fetch(`/api/crawls/${encodeURIComponent(jobId)}`, {
     method: "DELETE",

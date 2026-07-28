@@ -93,6 +93,14 @@ export function shell(): string {
             </div>
             <button class="primary-button" id="crawl-button" type="submit">${icons.compass}<span>Launch crawl</span></button>
           </form>
+          <label class="field">
+            <span>Background workers</span>
+            <span class="range-wrap">
+              <input id="worker-count" type="range" min="0" max="16" step="1" value="2" aria-label="Background crawl workers" />
+              <span class="range-value" id="worker-count-value">2</span>
+            </span>
+          </label>
+          <p class="section-copy">More workers run more queued crawls at once. Scale down gently: running crawls finish their current work first.</p>
         </section>
 
         <section class="panel-section">
@@ -125,6 +133,20 @@ export function shell(): string {
             <span>Hide unlinked nodes</span>
             <input id="isolated-filter" type="checkbox" />
             <span class="toggle" aria-hidden="true"></span>
+          </label>
+          <label class="field">
+            <span>Group spacing</span>
+            <span class="range-wrap">
+              <input id="cluster-spread" type="range" min="0.3" max="3" step="0.05" value="1" />
+              <span class="range-value" id="cluster-spread-value">1.00×</span>
+            </span>
+          </label>
+          <label class="field">
+            <span>Node spacing</span>
+            <span class="range-wrap">
+              <input id="node-spread" type="range" min="0.3" max="3" step="0.05" value="1" />
+              <span class="range-value" id="node-spread-value">1.00×</span>
+            </span>
           </label>
           <label class="field">
             <span>Node scale</span>

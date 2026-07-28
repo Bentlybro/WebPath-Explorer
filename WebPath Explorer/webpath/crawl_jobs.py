@@ -36,7 +36,9 @@ CrawlRunner = Callable[
 
 
 class CrawlJobManager:
-    """Claim durable jobs with a bounded set of process-local worker threads."""
+    """Claim durable jobs with a resizable set of process-local workers."""
+
+    MAX_WORKERS = 16
 
     def __init__(
         self,
@@ -49,22 +51,67 @@ class CrawlJobManager:
     ):
         self.store = store
         self.runner = runner
-        self.worker_count = max(0, min(int(worker_count), 32))
+        self.worker_count = max(0, min(int(worker_count), self.MAX_WORKERS))
         self.progress_interval = max(0.05, float(progress_interval))
         self._condition = threading.Condition()
         self._stopping = threading.Event()
         self._cancel_events: dict[str, threading.Event] = {}
         self._threads: list[threading.Thread] = []
+        self._thread_serial = 0
         if recover:
             self.store.recover_crawl_jobs()
-        for index in range(self.worker_count):
-            thread = threading.Thread(
-                target=self._worker,
-                name=f"webpath-crawl-{index + 1}",
-                daemon=True,
-            )
-            thread.start()
-            self._threads.append(thread)
+        with self._condition:
+            for _index in range(self.worker_count):
+                self._start_worker_locked()
+
+    def _start_worker_locked(self) -> None:
+        """Start one worker thread. Caller must hold the condition lock."""
+        self._thread_serial += 1
+        thread = threading.Thread(
+            target=self._worker,
+            name=f"webpath-crawl-{self._thread_serial}",
+            daemon=True,
+        )
+        thread.start()
+        self._threads.append(thread)
+
+    def _prune_threads_locked(self) -> None:
+        self._threads[:] = [thread for thread in self._threads if thread.is_alive()]
+
+    def set_worker_count(self, count: int) -> dict[str, int]:
+        """Resize the pool at runtime.
+
+        Extra workers start immediately. Surplus workers retire cooperatively
+        between jobs, so a running crawl is never interrupted by a scale-down.
+        """
+        count = max(0, min(int(count), self.MAX_WORKERS))
+        with self._condition:
+            self.worker_count = count
+            self._prune_threads_locked()
+            while len(self._threads) < count:
+                self._start_worker_locked()
+            self._condition.notify_all()
+            return self._status_locked()
+
+    def worker_status(self) -> dict[str, int]:
+        with self._condition:
+            self._prune_threads_locked()
+            return self._status_locked()
+
+    def _status_locked(self) -> dict[str, int]:
+        return {
+            "workers": self.worker_count,
+            "threads": len(self._threads),
+            "active_jobs": len(self._cancel_events),
+            "max_workers": self.MAX_WORKERS,
+        }
+
+    def submit(self, starting_url: str, max_depth: int) -> dict[str, Any]:
+        job = self.store.create_crawl_job(
+            str(uuid.uuid4()), starting_url, max_depth
+        )
+        self.wake()
+        return job
 
     def submit(self, starting_url: str, max_depth: int) -> dict[str, Any]:
         job = self.store.create_crawl_job(
@@ -97,6 +144,15 @@ class CrawlJobManager:
 
     def _worker(self) -> None:
         while not self._stopping.is_set():
+            with self._condition:
+                self._prune_threads_locked()
+                current = threading.current_thread()
+                if len(self._threads) > self.worker_count:
+                    # Scale-down: retire this surplus worker between jobs.
+                    # The check and removal hold the lock, so exactly
+                    # len(threads) - worker_count workers retire.
+                    self._threads.remove(current)
+                    return
             job = self.store.claim_next_crawl_job()
             if job is None:
                 with self._condition:

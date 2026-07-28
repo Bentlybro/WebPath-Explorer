@@ -194,6 +194,95 @@ def test_manager_recovers_interrupted_jobs_and_failed_searches(tmp_path):
         manager.stop()
 
 
+def test_worker_pool_resizes_at_runtime(tmp_path):
+    store = GraphStore(tmp_path / "resize.db")
+    store.initialize()
+    release = threading.Event()
+    started = []
+
+    def blocking_runner(job, _progress, _cancel):
+        started.append(job["id"])
+        release.wait(timeout=5)
+        return {"pages_visited": 1, "edges_observed": 0}
+
+    manager = CrawlJobManager(store, blocking_runner, worker_count=1)
+    try:
+        first = manager.submit("https://example.com/1", 1)
+        second = manager.submit("https://example.com/2", 1)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not started:
+            time.sleep(0.01)
+        assert started == [first["id"]]
+
+        status = manager.set_worker_count(3)
+        assert status["workers"] == 3
+        assert status["threads"] == 3
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and len(started) < 2:
+            time.sleep(0.01)
+        assert started == [first["id"], second["id"]]
+
+        status = manager.set_worker_count(1)
+        assert status["workers"] == 1
+        release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = manager.worker_status()
+            if current["threads"] == 1:
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("surplus workers did not retire")
+
+        status = manager.set_worker_count(99)
+        assert status["workers"] == CrawlJobManager.MAX_WORKERS
+    finally:
+        release.set()
+        manager.stop()
+
+
+def test_worker_routes_expose_and_resize_the_pool(tmp_path, monkeypatch):
+    async def fake_validate(url):
+        return canonicalize_url(url)
+
+    monkeypatch.setattr(app_module, "validate_public_url", fake_validate)
+    app = app_module.create_app(
+        {
+            "TESTING": True,
+            "DATABASE": str(tmp_path / "workers-api.db"),
+            "CRAWL_JOB_WORKERS": 0,
+        }
+    )
+    client = app.test_client()
+    manager = app.extensions["crawl_job_manager"]
+    try:
+        status = client.get("/api/crawls/workers")
+        assert status.status_code == 200
+        assert status.get_json()["workers"] == 0
+
+        resized = client.put("/api/crawls/workers", json={"workers": 4})
+        assert resized.status_code == 200
+        assert resized.get_json()["workers"] == 4
+        assert resized.get_json()["threads"] == 4
+        assert client.get("/api/crawls/workers").get_json()["threads"] == 4
+
+        assert (
+            client.put("/api/crawls/workers", json={"workers": -1}).status_code
+            == 400
+        )
+        assert (
+            client.put("/api/crawls/workers", json={"workers": "many"}).status_code
+            == 400
+        )
+        assert client.put("/api/crawls/workers", json={}).status_code == 400
+
+        # The static workers route never collides with job lookups.
+        assert client.get("/api/crawls/workers").status_code == 200
+        assert client.get("/api/crawls/not-a-job").status_code == 404
+    finally:
+        manager.stop()
+
+
 def test_manager_coalesces_progress_and_flushes_final_values(tmp_path):
     store = GraphStore(tmp_path / "coalesced-progress.db")
     store.initialize()

@@ -5,8 +5,10 @@ import {
   clearGraph,
   domainOf,
   fetchCrawlJobs,
+  fetchCrawlWorkers,
   fetchGraph,
   launchCrawl,
+  setCrawlWorkers,
 } from "./api";
 import { GraphModel, type FilterState, type SelectionDetails } from "./graph/model";
 import { ShallotGraphRenderer, startShallotRenderer } from "./graph/renderer";
@@ -46,6 +48,12 @@ const nodeScale = element<HTMLInputElement>("#node-scale");
 const nodeScaleValue = element<HTMLSpanElement>("#node-scale-value");
 const edgeAlpha = element<HTMLInputElement>("#edge-alpha");
 const edgeAlphaValue = element<HTMLSpanElement>("#edge-alpha-value");
+const clusterSpread = element<HTMLInputElement>("#cluster-spread");
+const clusterSpreadValue = element<HTMLSpanElement>("#cluster-spread-value");
+const nodeSpread = element<HTMLInputElement>("#node-spread");
+const nodeSpreadValue = element<HTMLSpanElement>("#node-spread-value");
+const workerCount = element<HTMLInputElement>("#worker-count");
+const workerCountValue = element<HTMLSpanElement>("#worker-count-value");
 const crawlForm = element<HTMLFormElement>("#crawl-form");
 const crawlUrl = element<HTMLInputElement>("#crawl-url");
 const crawlDepth = element<HTMLInputElement>("#crawl-depth");
@@ -776,7 +784,7 @@ async function loadGraph(
     if (controller.signal.aborted) return;
     statusMessage.textContent = "Building typed graph buffers…";
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    const nextModel = new GraphModel(dataset);
+    const nextModel = new GraphModel(dataset, currentLayoutOptions());
     if (controller.signal.aborted) return;
     nextModel.updateFilter(filterState());
     model = nextModel;
@@ -1291,6 +1299,65 @@ edgeAlpha.addEventListener("input", () => {
   edgeAlphaValue.textContent = `${Math.round(Number(edgeAlpha.value) * 100)}%`;
 });
 
+function currentLayoutOptions(): { clusterSpread: number; nodeSpread: number } {
+  return {
+    clusterSpread: Number(clusterSpread.value),
+    nodeSpread: Number(nodeSpread.value),
+  };
+}
+
+let layoutTimer = 0;
+function scheduleLayoutUpdate(): void {
+  window.clearTimeout(layoutTimer);
+  layoutTimer = window.setTimeout(() => {
+    layoutTimer = 0;
+    if (!model) return;
+    model.setLayoutOptions(currentLayoutOptions());
+    renderer.syncModel();
+  }, 120);
+}
+
+clusterSpread.addEventListener("input", () => {
+  clusterSpreadValue.textContent = `${Number(clusterSpread.value).toFixed(2)}×`;
+  scheduleLayoutUpdate();
+});
+
+nodeSpread.addEventListener("input", () => {
+  nodeSpreadValue.textContent = `${Number(nodeSpread.value).toFixed(2)}×`;
+  scheduleLayoutUpdate();
+});
+
+function renderWorkerCount(workers: number): void {
+  workerCount.value = String(workers);
+  workerCountValue.textContent = `${workers} worker${workers === 1 ? "" : "s"}`;
+}
+
+async function refreshWorkerCount(): Promise<void> {
+  try {
+    const status = await fetchCrawlWorkers();
+    renderWorkerCount(status.workers);
+  } catch {
+    workerCount.disabled = true;
+    workerCountValue.textContent = "n/a";
+  }
+}
+
+workerCount.addEventListener("change", async () => {
+  const requested = Number(workerCount.value);
+  try {
+    const status = await setCrawlWorkers(requested);
+    renderWorkerCount(status.workers);
+    toast(
+      `Background workers set to ${status.workers} · ${status.active_jobs} crawl${
+        status.active_jobs === 1 ? "" : "s"
+      } running`,
+    );
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), true);
+    void refreshWorkerCount();
+  }
+});
+
 crawlForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   let url: URL;
@@ -1431,6 +1498,7 @@ async function bootstrap(): Promise<void> {
   liveSocket.connect();
   updateLiveIndicator();
   void refreshCrawlJobs();
+  void refreshWorkerCount();
   if (!navigator.gpu) {
     const message =
       "WebGPU is unavailable. Enable hardware acceleration or open this page in a current browser.";
@@ -1457,6 +1525,7 @@ if (import.meta.hot) {
     window.clearTimeout(liveFlushTimer);
     window.clearTimeout(externalResyncTimer);
     window.clearTimeout(recentActivityTimer);
+    window.clearTimeout(layoutTimer);
     if (crawlActivityFrame) cancelAnimationFrame(crawlActivityFrame);
     liveSocket.close();
     shallotState?.dispose();

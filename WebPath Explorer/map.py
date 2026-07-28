@@ -701,6 +701,28 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         jobs = active_store.list_crawl_jobs(status=status, limit=limit)
         return jsonify({"jobs": jobs, "count": len(jobs)})
 
+    @app.get("/api/crawls/workers")
+    def get_crawl_workers():
+        manager: CrawlJobManager = current_app.extensions["crawl_job_manager"]
+        return jsonify(manager.worker_status())
+
+    @app.put("/api/crawls/workers")
+    def set_crawl_workers():
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or "workers" not in data:
+            abort(400, description="a JSON object with a workers field is required")
+        manager: CrawlJobManager = current_app.extensions["crawl_job_manager"]
+        try:
+            workers = _bounded_int(
+                data.get("workers"),
+                "workers",
+                minimum=0,
+                maximum=CrawlJobManager.MAX_WORKERS,
+            )
+        except ValueError as exc:
+            abort(400, description=str(exc))
+        return jsonify(manager.set_worker_count(workers))
+
     @app.get("/api/crawls/<job_id>")
     def get_crawl_job(job_id: str):
         active_store: GraphStore = current_app.extensions["graph_store"]
