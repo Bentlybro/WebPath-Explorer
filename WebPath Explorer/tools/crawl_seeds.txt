@@ -1,0 +1,12 @@
+# Broad and link-rich starting points for the permanent research graph.
+https://arxiv.org/list/cs.AI/recent
+https://huggingface.co/papers
+https://developer.mozilla.org/en-US/docs/Web
+https://www.w3.org/TR/
+https://docs.python.org/3/
+https://en.wikipedia.org/wiki/Portal:Current_events
+https://www.gutenberg.org/browse/scores/top
+https://www.nasa.gov/news/
+https://github.com/trending
+https://ourworldindata.org/
+https://lobste.rs/

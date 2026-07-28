@@ -1,26 +1,104 @@
-# WebPath Explorer 🌐🔍
+# WebPath Explorer
 
-Welcome to *WebPath Explorer*, your gateway to uncovering the hidden connections of the web! 🕸️
+WebPath Explorer is a local-first, persistent research graph for websites, crawls, searches, and AI-agent browsing history. Its frontend uses Shallot and WebGPU to upload graph data into typed GPU buffers and draw every visible connection and node in two instanced draw calls.
 
-🔍 **How It Works**: Upon receiving an initial URL, WebPath Explorer dives in, harvesting every link from the site. Each link is stored and tagged as connected to the starting site. The tool then systematically visits each of these new sites, continuing to collect and link further URLs, thereby revealing the intricate web of connections between sites.
+The current system provides the following capabilities:
 
-⚙️ **Technology Stack**: The visual mapping is powered by D3.js, offering an interactive and dynamic graphical representation of web connections. The backend, built with Python Flask, handles the web exploration, mapping, and data retrieval, storing the results in a database for the frontend visualization.
+- The Shallot/WebGPU viewer switches between a stable 2D overview and a genuinely volumetric 3D scene with independent XYZ positions, orbit controls, perspective projection, depth testing, filtering, neighborhood isolation, node details, and crawl actions.
+- A same-origin WebSocket stream pushes crawl lifecycle events and batched node and connection deltas into the open graph in real time.
+- The live status badge opens an accessible crawl monitor that shows every pending or running crawl, its starting URL, current URL, depth, visited pages, queued pages, observed edges, and recent completion or failure state.
+- The renderer-oriented graph API returns the complete graph by default while retaining optional limits, filters, neighborhoods, and keyset pagination for constrained clients.
+- Additive SQLite migrations preserve the original graph while adding durable agents, research sessions, searches, relationships, and idempotent observations.
+- AI agents can append searches and sources through a transactional ingestion API or the dependency-free Python bridge.
+- The crawler uses shared asynchronous HTTP sessions, bounded concurrency, timeouts, page and response limits, URL canonicalization, relative-link resolution, redirect validation, and private-network blocking.
+- The reusable batch launcher can feed many starting sites into the running service with bounded cross-crawl concurrency, finite request timeouts, and safe transient retries.
+- Administrative graph clearing requires a token, and agent ingestion can be protected with a separate optional token.
 
-⚠️ **Performance Notice**: Currently, with over 20-30,000 nodes (websites) and 60,000 edges (links between websites), the tool may experience lag. We're working on optimizing this for smoother experiences in future updates.
+## Run the application
 
-🖱️ **Interactive Exploration**: Left-click on a node to start a search from that point, or right-click on a node to visit its webpage. Discover and navigate the web in a more intuitive and engaging way!
+WebGPU requires a compatible browser and a secure context, which means either `localhost` during local development or HTTPS in a deployed environment. Recent versions of Chrome and Edge are the safest choices.
 
-💻 **Getting Started**: To begin, `cd` into `WebPath Explorer`, run `python map.py`, then visit `http://127.0.0.1:5000`. After adding a website URL, check the terminal to see the traversal across sites. Note: The greater the 'max depth', the longer it takes to gather links and display the map. Your patience is appreciated as we continue to improve this tool!
+```powershell
+cd "WebPath Explorer"
+python -m pip install -r requirements.txt
+python map.py
+```
 
-📹 **Visualizing the Web**: Check out the video below showcasing 30,000 nodes and 60,000 edges. Note: The video has been sped up initially for a better viewing experience as we work on resolving the lag issues. This visualization beautifully captures the complex structure and interconnectedness of the internet.
+Open <http://127.0.0.1:5000>. The compiled frontend is committed under `WebPath Explorer/static/dist`, so running the Python application does not require Node.js.
 
-🤝 **Join the Effort**: Contributions and pull requests are greatly appreciated! They play a crucial role in enhancing the capabilities of WebPath Explorer. Whether it's code optimization, new features, or bug fixes, your input helps us grow. Let's build a better tool together!
+## Crawl websites
 
----
-[If You Like This Project Join My Discord Server](https://discord.gg/yjjC2J569K)
+Enter a complete HTTP or HTTPS URL in the sidebar, choose a depth, and select **Launch crawl**. The button remains available while other work is running, so multiple requests can crawl concurrently. Select the live crawl badge in the top bar to inspect current work, and press Escape or select outside the drawer to close it.
 
-https://github.com/Bentlybro/WebPath-Explorer/assets/27962737/269156c8-6adf-4a58-901d-2e0b1a97a5b9
+The crawler records every discovered link as a graph relationship, but it fetches at most the configured page limit for each search. Depth controls how many breadth-first waves are fetched rather than imposing a rendering limit.
 
-![image](https://github.com/Bentlybro/WebPath-Explorer/assets/27962737/d9463746-70eb-4a8a-81df-6deffdf3c3fb)
+To launch the maintained broad seed set from a terminal, keep the web application running and use:
 
-![image](https://github.com/Bentlybro/WebPath-Explorer/assets/27962737/c647ad83-b3d9-408d-918a-14c614997afb)
+```powershell
+cd "WebPath Explorer"
+python tools/batch_crawl.py --depth 4 --concurrency 3
+```
+
+Edit `tools/crawl_seeds.txt` to change the default starting sites. You can also pass URLs directly, select another file with `--seed-file`, or adjust request and retry behavior with `--request-timeout`, `--retries`, and `--retry-delay`. Cross-crawl concurrency multiplies the per-crawl HTTP concurrency, so increase it deliberately instead of launching an unbounded burst against SQLite or remote websites.
+
+## Develop the frontend
+
+The exact Shallot 0.4.0 snapshot used by the build is stored as `frontend/vendor/dylanebert-shallot-0.4.0.tgz`. The snapshot was packed from `C:\Users\Bently\Desktop\shallot`, which prevents later edits to that checkout from silently changing WebPath Explorer.
+
+```powershell
+cd "WebPath Explorer\frontend"
+npm install
+npm run build
+```
+
+For a live Vite frontend, run `npm run dev` alongside `python map.py`. The production build writes directly to `WebPath Explorer/static/dist`.
+
+The renderer explicitly passes Shallot's supported `NoLoading` implementation. This prevents Shallot's default branded loading overlay from being created while leaving initialization errors visible through WebPath Explorer's non-blocking status and toast UI.
+
+## Connect AI agents
+
+Agents append research with `POST /api/agent/ingest`. Each transactional batch identifies an agent and research session and can contain one search, many sources, and relationships. Stable `event_id` values make retries idempotent.
+
+An agent can also call the included bridge:
+
+```powershell
+python tools/agent_client.py research-batch.json
+```
+
+See [Agent ingestion](WebPath%20Explorer/docs/agent-ingestion.md) for the complete contract, idempotency rules, and integration example.
+
+## Configure safety and limits
+
+The server binds to `127.0.0.1` and runs without debug mode by default. The following environment variables control its behavior:
+
+- `WEBPATH_DB_PATH` or `WEBPATH_DATABASE` selects the SQLite database path.
+- `WEBPATH_ADMIN_TOKEN` is required as `X-Admin-Token` when clearing the graph.
+- `WEBPATH_INGEST_TOKEN`, when configured, is required as `X-Ingest-Token` for agent ingestion.
+- `WEBPATH_EVENTS_TOKEN` optionally protects the `/ws` live-event stream.
+- `WEBPATH_EVENT_HISTORY_SIZE`, `WEBPATH_EVENT_QUEUE_SIZE`, `WEBPATH_EVENT_BATCH_SIZE`, and `WEBPATH_EVENT_HEARTBEAT_SECONDS` control live-event replay, subscriber buffering, delta batching, and heartbeats.
+- `WEBPATH_CORS_ORIGINS` defines a comma-separated list of trusted API origins.
+- `WEBPATH_MAX_CRAWL_DEPTH`, `WEBPATH_MAX_CRAWL_PAGES`, `WEBPATH_CRAWL_CONCURRENCY`, `WEBPATH_CRAWL_TIMEOUT`, and `WEBPATH_MAX_RESPONSE_BYTES` define crawler limits.
+- `WEBPATH_HOST`, `WEBPATH_PORT`, and `WEBPATH_DEBUG` control the local server.
+
+Application-level URL validation reduces server-side request forgery risk, but any internet-facing deployment should also place the crawler behind an egress firewall. Operators should respect remote-site terms, robots policies, and reasonable request rates.
+
+## Verify the repository
+
+Run the backend tests with:
+
+```powershell
+cd "WebPath Explorer"
+python -m pip install -r requirements-dev.txt
+python -m pytest -q --basetemp .pytest-tmp/full
+```
+
+Run the frontend type check and production build with:
+
+```powershell
+cd "WebPath Explorer\frontend"
+npm run build
+```
+
+The current graph renders efficiently because drawing is batched on the GPU. End-to-end million-item operation will still require incremental binary graph transfer, append-only or capacity-grown GPU buffers, and batched background database writes so that JSON serialization, full CPU model reconstruction, and SQLite write throughput do not become the limiting stages.
+
+See [Architecture and scaling](WebPath%20Explorer/docs/architecture.md) for the detailed system boundaries and roadmap.

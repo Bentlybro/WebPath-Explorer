@@ -1,0 +1,16 @@
+/.agents/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp/
+.release-tmp/
+.venv/
+venv/
+*.db-shm
+*.db-wal
+*.db-journal
+WebPath Explorer/web_graph.db
+WebPath Explorer/frontend/node_modules/
+WebPath Explorer/frontend/.vite/
+WebPath Explorer/.runtime/
+/WebPath/

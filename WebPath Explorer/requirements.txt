@@ -1,0 +1,5 @@
+aiohttp>=3.10,<4
+beautifulsoup4>=4.12,<5
+Flask>=3.0,<4
+Flask-Cors>=5,<7
+flask-sock>=0.7,<1
