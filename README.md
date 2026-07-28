@@ -8,7 +8,7 @@ The current system provides the following capabilities:
 - A same-origin WebSocket stream pushes crawl lifecycle events and batched node and connection deltas into the open graph in real time.
 - Durable background crawl jobs accept submissions immediately, run on a bounded worker pool, survive process restarts, and support cooperative cancellation from the crawl monitor.
 - The live status badge opens an accessible crawl monitor that shows every pending or running crawl, its starting URL, current URL, depth, visited pages, queued pages, observed edges, cancellation controls, and recent completion, failure, or cancellation state.
-- A progressive graph API delivers snapshot-bounded node and edge pages with independent cursors, so a growing graph can be loaded incrementally without one enormous JSON response.
+- A progressive graph API delivers snapshot-bounded node and edge pages with independent cursors for constrained clients, while the browser loads the complete graph in one request because Shallot renders the full buffer set immediately.
 - The renderer-oriented legacy graph API remains available and returns the complete graph by default while retaining optional limits, filters, neighborhoods, and keyset pagination for constrained clients.
 - Live deltas append into geometrically grown typed arrays and GPU buffers, so streaming growth uploads only changed ranges instead of rebuilding the CPU model and replacing every buffer.
 - Additive SQLite migrations preserve the original graph while adding durable agents, research sessions, searches, relationships, and idempotent observations.

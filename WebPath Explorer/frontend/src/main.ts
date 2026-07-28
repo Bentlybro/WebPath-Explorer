@@ -1,22 +1,17 @@
 import "./styles.css";
 import type { State } from "@dylanebert/shallot";
 import {
-  ApiError,
   cancelCrawlJob,
   clearGraph,
   domainOf,
-  fetchBackendStats,
   fetchCrawlJobs,
   fetchGraph,
-  fetchGraphEdgePage,
-  fetchGraphManifest,
-  fetchGraphNodePage,
   launchCrawl,
 } from "./api";
 import { GraphModel, type FilterState, type SelectionDetails } from "./graph/model";
 import { ShallotGraphRenderer, startShallotRenderer } from "./graph/renderer";
 import { LiveGraphSocket, type LiveConnectionState, type LiveGraphEvent } from "./live";
-import type { CrawlJob, GraphDataset, GraphEdge, GraphNode, GraphQuery, NodeId } from "./types";
+import type { CrawlJob, GraphEdge, GraphNode, GraphQuery, NodeId } from "./types";
 import { shell } from "./ui/shell";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -145,8 +140,7 @@ let externalResyncTimer = 0;
 let finalResyncRunning = false;
 let queuedResync: { message?: string } | null = null;
 let completionResyncNeeded = false;
-let loadBaselineSequence: number | null = null;
-const bufferedLoadEvents: LiveGraphEvent[] = [];
+let graphLoading = false;
 
 function setBusy(busy: boolean, message?: string): void {
   operationBusy = busy;
@@ -762,152 +756,56 @@ interface LoadGraphOptions {
   fit?: boolean;
 }
 
-function emptyDataset(eventSequence?: number): GraphDataset {
-  return {
-    nodes: [],
-    edges: [],
-    stats: { total_nodes: 0, total_edges: 0 },
-    truncated: false,
-    source: "graph-v2",
-    eventSequence,
-  };
-}
-
 /**
- * Load the graph through the progressive v2 API: create a snapshot manifest,
- * append node pages then edge pages into one incremental model, and buffer
- * live events newer than the manifest's event sequence until the load ends.
- * Older servers without the v2 routes fall back to the legacy graph API.
+ * Load the complete graph in one request and build the typed model in a
+ * single pass. Shallot renders the full buffer set immediately, so paging
+ * the initial load would only add latency; incremental appends are reserved
+ * for live deltas after the load.
  */
 async function loadGraph(
   query: GraphQuery = {},
   options: LoadGraphOptions = { fit: true },
-  retried = false,
 ): Promise<void> {
   loadController?.abort();
   const controller = new AbortController();
   loadController = controller;
+  graphLoading = true;
   setBusy(true, "Loading the graph…");
   try {
-    const manifest = await fetchGraphManifest(query, controller.signal);
+    const dataset = await fetchGraph(query, controller.signal);
     if (controller.signal.aborted) return;
-    if (!manifest) {
-      await loadGraphLegacy(query, options, controller);
-      return;
-    }
-
-    const nextModel = new GraphModel(emptyDataset(manifest.event_sequence));
-    nextModel.dataset.stats.total_nodes = manifest.counts.nodes;
-    nextModel.dataset.stats.total_edges = manifest.counts.edges;
+    statusMessage.textContent = "Building typed graph buffers…";
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const nextModel = new GraphModel(dataset);
+    if (controller.signal.aborted) return;
     nextModel.updateFilter(filterState());
     model = nextModel;
     renderer.setModel(nextModel);
-    loadBaselineSequence = manifest.event_sequence;
-    const backendStats = await fetchBackendStats(controller.signal);
-    if (backendStats) {
-      nextModel.dataset.stats.total_nodes = backendStats.nodes ?? manifest.counts.nodes;
-      nextModel.dataset.stats.total_edges = backendStats.edges ?? manifest.counts.edges;
-      nextModel.dataset.stats.total_domains = backendStats.domains;
-      nextModel.dataset.stats.total_searches = backendStats.searches;
-      nextModel.dataset.stats.total_agents = backendStats.agents;
-    }
-    try {
-      let after = 0;
-      const nodeLimit = manifest.recommended_limits.nodes;
-      while (true) {
-        const page = await fetchGraphNodePage(
-          manifest.snapshot,
-          after,
-          nodeLimit,
-          controller.signal,
-        );
-        if (controller.signal.aborted) return;
-        nextModel.appendNodes(page.items);
-        renderer.syncModel();
-        updateStats();
-        statusMessage.textContent = `Loading nodes · ${formatter.format(
-          nextModel.nodes.length,
-        )} of ${formatter.format(manifest.counts.nodes)}`;
-        if (page.page.done || page.page.next_after === null) break;
-        after = page.page.next_after;
-      }
-      after = 0;
-      const edgeLimit = manifest.recommended_limits.edges;
-      while (true) {
-        const page = await fetchGraphEdgePage(
-          manifest.snapshot,
-          after,
-          edgeLimit,
-          controller.signal,
-        );
-        if (controller.signal.aborted) return;
-        nextModel.appendEdges(page.items);
-        renderer.syncModel();
-        updateStats();
-        statusMessage.textContent = `Loading links · ${formatter.format(
-          nextModel.edgeCount,
-        )} of ${formatter.format(manifest.counts.edges)}`;
-        if (page.page.done || page.page.next_after === null) break;
-        after = page.page.next_after;
-      }
-    } finally {
-      loadBaselineSequence = null;
-    }
-    const buffered = bufferedLoadEvents.splice(0);
-    for (const event of buffered) handleLiveEvent(event);
-    flushLiveGraph();
     addOptions(domainFilter, nextModel.uniqueDomains());
     addOptions(kindFilter, nextModel.uniqueKinds());
     if (options.fit !== false) fitGraph();
     updateStats();
     updateVisibleStats();
+    const sourceLabel = dataset.source === "graph" ? "graph API" : "legacy API bridge";
     statusMessage.textContent = `Loaded ${formatter.format(
       nextModel.nodes.length,
-    )} nodes and ${formatter.format(nextModel.edgeCount)} links through the progressive graph API`;
+    )} nodes and ${formatter.format(nextModel.edgeCount)} links through ${sourceLabel}${
+      dataset.truncated ? " · slice capped" : ""
+    }`;
+    if (dataset.truncated) {
+      toast("This view is a bounded slice of the permanent graph. Refine search to explore more.");
+    }
   } catch (error) {
     if (controller.signal.aborted) return;
-    if (
-      !retried &&
-      error instanceof ApiError &&
-      error.status === 409
-    ) {
-      // The snapshot token expired mid-load; start over with a fresh one.
-      await loadGraph(query, options, true);
-      return;
-    }
     const message = error instanceof Error ? error.message : String(error);
     statusMessage.textContent = `Graph load failed · ${message}`;
     toast(message, true);
   } finally {
-    loadBaselineSequence = null;
-    if (!controller.signal.aborted) setBusy(false);
-  }
-}
-
-async function loadGraphLegacy(
-  query: GraphQuery,
-  options: LoadGraphOptions,
-  controller: AbortController,
-): Promise<void> {
-  const dataset = await fetchGraph(query, controller.signal);
-  if (controller.signal.aborted) return;
-  statusMessage.textContent = "Building typed graph buffers…";
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  const nextModel = new GraphModel(dataset);
-  if (controller.signal.aborted) return;
-  nextModel.updateFilter(filterState());
-  model = nextModel;
-  renderer.setModel(nextModel);
-  flushLiveGraph();
-  addOptions(domainFilter, nextModel.uniqueDomains());
-  addOptions(kindFilter, nextModel.uniqueKinds());
-  if (options.fit !== false) fitGraph();
-  updateStats();
-  updateVisibleStats();
-  const sourceLabel = dataset.source === "graph" ? "graph API" : "legacy API bridge";
-  statusMessage.textContent = `Loaded through ${sourceLabel}${dataset.truncated ? " · slice capped" : ""}`;
-  if (dataset.truncated) {
-    toast("This view is a bounded slice of the permanent graph. Refine search to explore more.");
+    graphLoading = false;
+    if (!controller.signal.aborted) {
+      flushLiveGraph();
+      setBusy(false);
+    }
   }
 }
 
@@ -938,7 +836,9 @@ function flushLiveGraph(): void {
   window.clearTimeout(liveFlushTimer);
   liveFlushTimer = 0;
   liveDirtySince = 0;
-  if (!model) return;
+  // While a full load is in flight, staged deltas keep accumulating and are
+  // appended to the new model as soon as it becomes current.
+  if (!model || graphLoading) return;
   if (stagedLiveNodes.length) model.appendNodes(stagedLiveNodes.splice(0));
   if (stagedLiveEdges.length) model.appendEdges(stagedLiveEdges.splice(0));
   renderer.syncModel();
@@ -989,26 +889,7 @@ function progressLabel(event: Extract<LiveGraphEvent, { type: "crawl-progress" }
   return parts.length ? `Crawling · ${parts.join(" · ")}` : "Crawl in progress…";
 }
 
-function isGraphDataEvent(event: LiveGraphEvent): boolean {
-  return (
-    event.type === "node" ||
-    event.type === "edge" ||
-    event.type === "graph-delta" ||
-    event.type === "graph-changed"
-  );
-}
-
 function handleLiveEvent(event: LiveGraphEvent): void {
-  // While a snapshot loads, hold graph-carrying events that are newer than
-  // the manifest's high-water event sequence. They are replayed once the
-  // edge phase finishes so the model never applies a delta twice.
-  if (loadBaselineSequence !== null && isGraphDataEvent(event)) {
-    const sequence = "sequence" in event ? event.sequence : undefined;
-    if (sequence === undefined || sequence > loadBaselineSequence) {
-      bufferedLoadEvents.push(event);
-    }
-    return;
-  }
   switch (event.type) {
     case "crawl-start":
       trackLiveCrawl(event);
