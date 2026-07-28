@@ -95,10 +95,7 @@ export function shell(): string {
           </form>
           <label class="field">
             <span>Background workers</span>
-            <span class="range-wrap">
-              <input id="worker-count" type="range" min="0" max="16" step="1" value="2" aria-label="Background crawl workers" />
-              <span class="range-value" id="worker-count-value">2</span>
-            </span>
+            <input id="worker-count" type="number" min="0" max="16" step="1" value="2" aria-label="Background crawl workers" />
           </label>
           <p class="section-copy">More workers run more queued crawls at once. Scale down gently: running crawls finish their current work first.</p>
         </section>

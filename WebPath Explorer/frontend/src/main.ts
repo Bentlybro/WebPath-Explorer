@@ -53,7 +53,6 @@ const clusterSpreadValue = element<HTMLSpanElement>("#cluster-spread-value");
 const nodeSpread = element<HTMLInputElement>("#node-spread");
 const nodeSpreadValue = element<HTMLSpanElement>("#node-spread-value");
 const workerCount = element<HTMLInputElement>("#worker-count");
-const workerCountValue = element<HTMLSpanElement>("#worker-count-value");
 const crawlForm = element<HTMLFormElement>("#crawl-form");
 const crawlUrl = element<HTMLInputElement>("#crawl-url");
 const crawlDepth = element<HTMLInputElement>("#crawl-depth");
@@ -1329,7 +1328,6 @@ nodeSpread.addEventListener("input", () => {
 
 function renderWorkerCount(workers: number): void {
   workerCount.value = String(workers);
-  workerCountValue.textContent = `${workers} worker${workers === 1 ? "" : "s"}`;
 }
 
 async function refreshWorkerCount(): Promise<void> {
@@ -1338,12 +1336,12 @@ async function refreshWorkerCount(): Promise<void> {
     renderWorkerCount(status.workers);
   } catch {
     workerCount.disabled = true;
-    workerCountValue.textContent = "n/a";
+    workerCount.placeholder = "n/a";
   }
 }
 
 workerCount.addEventListener("change", async () => {
-  const requested = Number(workerCount.value);
+  const requested = Math.max(0, Math.min(16, Math.round(Number(workerCount.value) || 0)));
   try {
     const status = await setCrawlWorkers(requested);
     renderWorkerCount(status.workers);
